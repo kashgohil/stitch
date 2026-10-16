@@ -177,3 +177,22 @@ def test_cli_export_and_overwrite_guard(project, paths, tmp_path, monkeypatch, c
     assert main(["--export", str(project_file), "--output", str(output)]) == 1
     assert "already exists" in capsys.readouterr().err
     assert output.read_bytes() == original
+
+
+def test_short_fractional_rate_segments_join_on_exact_frame_boundaries(project, paths, tmp_path):
+    from uuid import uuid4
+
+    clips = tuple(
+        project.clips[0].model_copy(update={"id": uuid4(), "out_point": 0.02}) for _ in range(10)
+    )
+    project = project.model_copy(
+        update={
+            "clips": clips,
+            "output": project.output.model_copy(update={"frame_rate": "30000/1001"}),
+        }
+    )
+    result = export_project(project, tmp_path / "fractional.mp4", paths)
+    assert result.metadata.video.average_frame_rate == "30000/1001"
+    assert result.metadata.video.duration == pytest.approx(10 * 1001 / 30000, abs=0.0001)
+    pixels = ffmpeg("-i", result.path, "-map", "0:v:0", "-pix_fmt", "gray", "-f", "rawvideo", "-")
+    assert len(pixels) == 10 * 320 * 180
