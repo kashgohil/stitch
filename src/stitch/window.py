@@ -70,6 +70,7 @@ class MainWindow(QMainWindow):
         self.paths = paths
         self.document = Document()
         self.tools_ready = False
+        self.tools_checked = False
         self._closing = False
         self._close_after_import = False
         self._worker: DependencyWorker | None = None
@@ -656,6 +657,7 @@ class MainWindow(QMainWindow):
         if self._closing or self.busy or (self._worker and self._worker.isRunning()):
             return
         self.tools_ready = False
+        self.tools_checked = False
         self.status.setText("Checking media tools…")
         self.help.hide()
         self.details.hide()
@@ -670,6 +672,7 @@ class MainWindow(QMainWindow):
     def _checks_finished(self) -> None:
         results = self._worker.results
         self.tools_ready = bool(results) and all(tool.available for tool in results)
+        self.tools_checked = True
         self.status.setText(
             "Media tools are ready." if self.tools_ready else "Media setup needs attention."
         )

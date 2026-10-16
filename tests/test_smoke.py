@@ -43,3 +43,30 @@ def test_gui_smoke_runner_exports_all_profiles(tmp_path):
     for profile in report["profiles"]:
         assert profile["metadata"]["video"]["duration"] == pytest.approx(2.6, abs=0.000001)
         assert profile["metadata"]["stitch_generated"]
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="FFmpeg required"
+)
+def test_smoke_waits_for_queued_dependency_result(tmp_path):
+    for encoder in ("libx264", "libx265", "prores_ks"):
+        require_encoder(encoder)
+    directory = tmp_path / "delayed-smoke"
+    script = """
+import sys
+from pathlib import Path
+from PySide6.QtCore import QTimer
+from stitch.window import MainWindow
+from stitch.smoke import run_smoke
+original = MainWindow._checks_finished
+def delayed(self):
+    QTimer.singleShot(250, lambda: original(self))
+MainWindow._checks_finished = delayed
+sys.exit(run_smoke(Path(sys.argv[1])))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(directory)], capture_output=True, timeout=120
+    )
+    report = json.loads((directory / "smoke-report.json").read_text())
+    assert result.returncode == 0 and report["status"] == "passed", report

@@ -83,7 +83,8 @@ def run_smoke(directory: Path) -> int:
             if stage[0] != "finish" and time.monotonic() - started > 90:
                 raise TimeoutError(f"Smoke check timed out during {stage[0]}")
             if stage[0] == "tools":
-                if window._worker is None or window._worker.isRunning():
+                # Thread exit can precede delivery of its queued Qt finished slot.
+                if not window.tools_checked:
                     return
                 assert window.tools_ready, window.details.toPlainText()
                 window.import_folder_path(footage)
