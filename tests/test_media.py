@@ -112,6 +112,7 @@ def test_probe_uses_absolute_local_path_without_shell_or_frame_scan(tmp_path, mo
         assert command[-2:] == ["-i", str(path)]
         assert "-count_frames" not in command and "-show_frames" not in command
         assert command[command.index("-protocol_whitelist") + 1] == "file"
+        assert command[command.index("-threads") + 1] == "1"
         assert kwargs["timeout"] == 30
         assert not kwargs.get("shell")
         return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")

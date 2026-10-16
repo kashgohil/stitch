@@ -3,13 +3,15 @@
 import os
 import re
 import time
+from collections import deque
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from stitch.document import change_project, match_first_clip
 from stitch.media import MediaError, MissingSourceError, file_identity
-from stitch.models import FolderEntry, Project, Source
+from stitch.models import FileIdentity, FolderEntry, Project, Source
 from stitch.sources import append_video_source, refresh_source
 
 # Candidates only: ffprobe, not the suffix, decides whether a file contains video.
@@ -17,6 +19,29 @@ VIDEO_SUFFIXES = frozenset(
     ".mp4 .mov .mkv .webm .avi .m4v .mts .m2ts .mpeg .mpg .ts .wmv .flv "
     ".3gp .3g2 .mxf .vob .ogv .ogm".split()
 )
+PROBE_WORKERS = 4
+
+
+@dataclass(frozen=True)
+class Inspection:
+    identity: FileIdentity
+    source: Source | None = None
+
+
+def inspect_candidate(
+    path: Path,
+    known_paths: frozenset[Path],
+    known_files: frozenset[tuple[int, int]],
+    cancelled: Callable[[], bool],
+) -> Inspection | None:
+    """Inspect independently. Only the coordinating thread changes the project."""
+    if cancelled():
+        return None
+    identity = file_identity(path)
+    if path in known_paths or (identity.inode and (identity.device, identity.inode) in known_files):
+        return Inspection(identity)
+    source = refresh_source(Source(path=path))
+    return Inspection(source.cache.identity, source)
 
 
 def natural_key(path: Path) -> tuple:
@@ -46,12 +71,15 @@ def scan_folder(
     progress: Callable[[int, int, str], None] = lambda *_: None,
     discovery: Callable[[str], None] = lambda _: None,
     match_output: bool = False,
+    probe_workers: int = PROBE_WORKERS,
 ) -> FolderResult:
     """Return only complete import decisions. Never modify or delete source files.
 
-    Successful imports survive cancellation. A running ffprobe finishes first;
-    scanning and subsequent probes stop at the next cancellation check.
+    At most four inspections run concurrently. Results enter the project in natural
+    order. Cancellation stops scheduling; already running probes finish before return.
     """
+    if type(probe_workers) is not int or not 1 <= probe_workers <= PROBE_WORKERS:
+        raise ValueError(f"probe_workers must be an integer between 1 and {PROBE_WORKERS}.")
     result = FolderResult(project)
     if cancelled():
         result.cancelled = True
@@ -114,34 +142,17 @@ def scan_folder(
                 result.errors.append(f"{path.name}: missing; queue/history kept.")
             except MediaError as exc:
                 result.errors.append(f"{path.name}: {exc}; queue/history kept.")
-    last_notice = 0.0
-    for index, path in enumerate(candidates, 1):
-        if cancelled():
-            result.cancelled = True
-            break
-        if time.monotonic() - last_notice >= 0.1 or index == len(candidates):
-            progress(index, len(candidates), path.name)
-            last_notice = time.monotonic()
-        try:
-            identity = file_identity(path)
-            if path in known or path in existing:
-                result.skipped += 1
-                if known.get(path) != identity:
-                    result.errors.append(
-                        f"{path.name}: changed or uninspected; use Add videos to explicitly "
-                        "re-import. Existing edits kept."
-                    )
-                elif not any(e.path == path for e in result.project.folder_history):
-                    result.project = change_project(
-                        result.project,
-                        folder_history=(
-                            *result.project.folder_history,
-                            FolderEntry(path=path, identity=identity),
-                        ),
-                    )
-                continue
-            if identity.inode and (identity.device, identity.inode) in physical:
-                result.skipped += 1
+
+    def accept(path: Path, inspection: Inspection) -> None:
+        identity = inspection.identity
+        if path in known or path in existing:
+            result.skipped += 1
+            if known.get(path) != identity:
+                result.errors.append(
+                    f"{path.name}: changed or uninspected; use Add videos to explicitly "
+                    "re-import. Existing edits kept."
+                )
+            elif not any(e.path == path for e in result.project.folder_history):
                 result.project = change_project(
                     result.project,
                     folder_history=(
@@ -149,19 +160,80 @@ def scan_folder(
                         FolderEntry(path=path, identity=identity),
                     ),
                 )
-                continue  # A renamed file/hard link must not restore an imported clip.
-            source = refresh_source(Source(path=path))
-            if source.cache.metadata.stitch_generated or source.cache.metadata.video is None:
-                result.skipped += 1
-                continue
-            updated = append_video_source(result.project, source)
-            if match_output and result.imported == 0:
-                updated = match_first_clip(updated)
-            result.project = updated
-            result.imported += 1
-            known[path] = source.cache.identity
-            physical[(source.cache.identity.device, source.cache.identity.inode)] = path
-        except (OSError, ValueError, RuntimeError) as exc:
-            result.errors.append(f"{path.name}: {exc}")
+            return
+        if identity.inode and (identity.device, identity.inode) in physical:
+            result.skipped += 1
+            result.project = change_project(
+                result.project,
+                folder_history=(
+                    *result.project.folder_history,
+                    FolderEntry(path=path, identity=identity),
+                ),
+            )
+            return  # A renamed file/hard link must not restore an imported clip.
+        source = inspection.source
+        if source is None:
+            raise MediaError("Source identity changed during discovery; refresh the folder.")
+        # A prefetched result can wait behind a slower file. Do not accept it
+        # if the file changed during that wait.
+        if file_identity(path) != identity:
+            raise MediaError("Source changed after inspection; refresh the folder.")
+        if source.cache.metadata.stitch_generated or source.cache.metadata.video is None:
+            result.skipped += 1
+            return
+        updated = append_video_source(result.project, source)
+        if match_output and result.imported == 0:
+            updated = match_first_clip(updated)
+        result.project = updated
+        result.imported += 1
+        known[path] = source.cache.identity
+        physical[(source.cache.identity.device, source.cache.identity.inode)] = path
+
+    # Limit pending futures as well as active threads. An early slow file must
+    # not accumulate results for the entire folder in memory.
+    pending = deque()
+    remaining = iter(enumerate(candidates, 1))
+    known_paths = frozenset(known.keys() | existing.keys())
+    known_files = frozenset(physical)
+    last_notice = 0.0
+    with ThreadPoolExecutor(max_workers=probe_workers, thread_name_prefix="stitch-inspect") as pool:
+
+        def schedule() -> None:
+            while len(pending) < probe_workers and not cancelled():
+                item = next(remaining, None)
+                if item is None:
+                    break
+                index, path = item
+                pending.append(
+                    (
+                        index,
+                        path,
+                        pool.submit(
+                            inspect_candidate,
+                            path,
+                            known_paths,
+                            known_files,
+                            cancelled,
+                        ),
+                    )
+                )
+
+        schedule()
+        while pending:
+            index, path, future = pending.popleft()
+            if time.monotonic() - last_notice >= 0.1 or index == len(candidates):
+                progress(index, len(candidates), path.name)
+                last_notice = time.monotonic()
+            try:
+                inspection = future.result()
+                if inspection is not None:
+                    accept(path, inspection)
+            except (OSError, ValueError, RuntimeError) as exc:
+                result.errors.append(f"{path.name}: {exc}")
+            if cancelled():
+                for _, _, future in pending:
+                    future.cancel()
+                break
+            schedule()
     result.cancelled |= cancelled()
     return result

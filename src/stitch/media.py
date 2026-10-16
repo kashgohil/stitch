@@ -192,6 +192,8 @@ def probe_media(path: Path, *, timeout: float = 30.0) -> MediaMetadata:
         "10000000",
         "-analyzeduration",
         "10000000",
+        "-threads",
+        "1",
         "-show_entries",
         entries,
         "-show_pixel_formats",

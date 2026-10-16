@@ -1,10 +1,12 @@
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Event, Lock, get_ident
 
 import pytest
 from pydantic import ValidationError
 
 from stitch.document import change_project, move_clip, remove_clip, replace_clip
-from stitch.folders import natural_key, scan_folder
+from stitch.folders import inspect_candidate, natural_key, scan_folder
 from stitch.media import MediaError
 from stitch.models import AudioSettings, AudioStream, Crop, MediaMetadata, Project, VideoStream
 from stitch.project_io import load_project, save_project
@@ -257,3 +259,128 @@ def test_renamed_removed_file_is_not_restored(folder):
     assert result.imported == 0 and result.project.clips == project.clips
     assert any(e.path.name == "renamed.mp4" for e in result.project.folder_history)
     assert scan_folder(result.project, folder).imported == 0
+
+
+def test_parallel_inspection_is_bounded_and_applied_in_order(folder, monkeypatch):
+    release = Event()
+    prefetched = Event()
+    barrier = Barrier(4, timeout=5)
+    lock = Lock()
+    started = []
+    completed = []
+    coordinator = []
+    applied_on = []
+    from stitch.sources import append_video_source
+
+    def inspect(path, *args):
+        with lock:
+            started.append(path.name)
+        index = int(path.stem.removeprefix("clip"))
+        if index <= 4:
+            barrier.wait()
+        result = inspect_candidate(path, *args)
+        if index == 1:
+            assert release.wait(5)
+        with lock:
+            completed.append(path.name)
+            if len(completed) == 3:
+                prefetched.set()
+        return result
+
+    def append(*args):
+        applied_on.append(get_ident())
+        return append_video_source(*args)
+
+    def scan():
+        coordinator.append(get_ident())
+        return scan_folder(Project(), folder, match_output=True)
+
+    monkeypatch.setattr("stitch.folders.inspect_candidate", inspect)
+    monkeypatch.setattr("stitch.folders.append_video_source", append)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(scan)
+        try:
+            assert prefetched.wait(5)
+            assert set(started) == {f"clip{i}.MP4" for i in range(1, 5)}
+            assert "clip1.MP4" not in completed
+            assert not applied_on
+        finally:
+            release.set()
+        result = future.result(timeout=5)
+    assert not result.errors and result.imported == 10
+    assert names(result.project) == [f"clip{i}.MP4" for i in range(1, 11)]
+    assert applied_on == coordinator * 10
+    assert result.project.output.width == 320
+
+
+def test_cancel_with_four_running_probes_joins_workers_and_refresh_resumes(folder, monkeypatch):
+    release = Event()
+    ready = Event()
+    stop = Event()
+    barrier = Barrier(4, action=ready.set, timeout=5)
+    finished = []
+
+    def inspect(path, *args):
+        # All four inspections have completed metadata work but are still running.
+        result = inspect_candidate(path, *args)
+        barrier.wait()
+        assert release.wait(5)
+        finished.append(path.name)
+        return result
+
+    monkeypatch.setattr("stitch.folders.inspect_candidate", inspect)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(scan_folder, Project(), folder, cancelled=stop.is_set)
+        try:
+            assert ready.wait(5)
+            stop.set()
+        finally:
+            release.set()
+        result = future.result(timeout=5)
+    assert result.cancelled and not result.errors
+    assert len(finished) == 4
+    assert names(result.project) == ["clip1.MP4"]
+    assert len(result.project.folder_history) == 1
+    monkeypatch.setattr("stitch.folders.inspect_candidate", inspect_candidate)
+    resumed = scan_folder(result.project, folder)
+    assert resumed.imported == 9 and not resumed.errors
+
+
+def test_prefetched_file_changed_before_acceptance_is_rejected(folder, monkeypatch):
+    second_ready = Event()
+
+    def inspect(path, *args):
+        result = inspect_candidate(path, *args)
+        if path.name == "clip2.MP4":
+            second_ready.set()
+        elif path.name == "clip1.MP4":
+            assert second_ready.wait(5)
+            (folder / "clip2.MP4").write_bytes(b"replaced after inspection")
+        return result
+
+    monkeypatch.setattr("stitch.folders.inspect_candidate", inspect)
+    result = scan_folder(Project(), folder)
+    assert result.imported == 9 and len(result.errors) == 1
+    assert "clip2.MP4: Source changed after inspection" in result.errors[0]
+    assert "clip2.MP4" not in names(result.project)
+    assert all(e.path.name != "clip2.MP4" for e in result.project.folder_history)
+
+
+def test_parallel_new_hard_links_are_deduplicated(folder):
+    (folder / "clip1-alias.mp4").hardlink_to(folder / "clip1.MP4")
+    result = scan_folder(Project(), folder)
+    assert result.imported == 10 and result.skipped == 1 and not result.errors
+    assert len(result.project.folder_history) == 11
+    assert scan_folder(result.project, folder).imported == 0
+
+
+@pytest.mark.parametrize("workers", [0, -1, 5, True, 2.5])
+def test_invalid_probe_worker_limits_are_rejected(folder, workers):
+    with pytest.raises(ValueError, match="probe_workers"):
+        scan_folder(Project(), folder, probe_workers=workers)
+
+
+def test_single_worker_mode_preserves_results(folder):
+    result = scan_folder(Project(), folder, probe_workers=1)
+    assert result.imported == 10 and not result.errors
+    assert names(result.project) == [f"clip{i}.MP4" for i in range(1, 11)]
