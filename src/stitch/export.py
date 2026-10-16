@@ -12,6 +12,12 @@ from dataclasses import asdict, dataclass, replace
 from fractions import Fraction
 from pathlib import Path
 
+from stitch.audio import (
+    active_overlay,
+    normalize_overlay_command,
+    overlay_duration,
+    overlay_mix_graph,
+)
 from stitch.media import MediaError, file_identity, probe_media
 from stitch.models import MediaMetadata, Project
 from stitch.paths import AppPaths
@@ -117,7 +123,12 @@ def publish_output(staged: Path, destination: Path, expected: tuple | None) -> N
 
 
 def concat_command(
-    ffmpeg: str, playlist: Path, output: Path, project: Project, duration: Fraction
+    ffmpeg: str,
+    playlist: Path,
+    output: Path,
+    project: Project,
+    duration: Fraction,
+    overlay_path: Path | None = None,
 ) -> tuple[str, ...]:
     args = [
         ffmpeg,
@@ -135,10 +146,25 @@ def concat_command(
         "1",
         "-i",
         str(playlist),
+    ]
+    if overlay_path is not None:
+        if project.overlay.end_behavior == "loop":
+            args += ["-stream_loop", "-1"]
+        args += [
+            "-protocol_whitelist",
+            "file",
+            "-i",
+            str(overlay_path),
+            "-filter_complex_threads",
+            "2",
+            "-filter_complex",
+            overlay_mix_graph(project, duration),
+        ]
+    args += [
         "-map",
         "0:v:0",
         "-map",
-        "0:a:0",
+        "[mix]" if overlay_path is not None else "0:a:0",
         "-map_metadata",
         "-1",
         "-map_chapters",
@@ -155,9 +181,9 @@ def concat_command(
         if project.output.profile == "hevc_main10":
             args += ["-tag:v", "hvc1"]
     # Repair sub-sample boundary rounding on a shared clock and encode delivery audio once.
+    if overlay_path is None:
+        args += ["-af", "aresample=48000:async=1:first_pts=0"]
     args += [
-        "-af",
-        "aresample=48000:async=1:first_pts=0",
         "-ar",
         "48000",
         "-ac",
@@ -220,10 +246,6 @@ def export_project(
     destination = destination.expanduser().absolute()
     if not project.clips:
         raise RenderError("Add at least one clip before exporting.")
-    if project.overlay is not None:
-        raise RenderError(
-            "Overlay audio export is not implemented yet; this project cannot be exported."
-        )
     expected = check_destination(project, destination, overwrite=overwrite)
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
@@ -235,6 +257,7 @@ def export_project(
     successful = False
     warnings = []
     segments = []
+    overlay_path = None
 
     def write_status() -> None:
         (job / "status.json").write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
@@ -256,6 +279,12 @@ def export_project(
     try:
         write_status()
         sources = {source.id: source for source in project.sources}
+        overlay_source = active_overlay(project)
+        used_sources = {clip.source_id for clip in project.clips}
+        if overlay_source:
+            used_sources.add(overlay_source.id)
+            if file_identity(overlay_source.path) != overlay_source.cache.identity:
+                raise RenderError("Overlay source changed; reimport it before exporting.")
         plans = []
         colors = set()
         for index, clip in enumerate(project.clips):
@@ -277,6 +306,14 @@ def export_project(
             )
         duration = sum((plan.duration for plan in plans), Fraction(0))
         estimate = estimate_disk(project, float(duration))
+        overlay_bytes = (
+            math.ceil(overlay_duration(overlay_source, duration) * 48000 * 6 * 1.5)
+            if overlay_source
+            else 0
+        )
+        render_estimate = estimate.segments
+        estimate = replace(estimate, segments=estimate.segments + overlay_bytes)
+        render_weight = 0.85 if overlay_source else 0.9
         state.update(estimate=asdict(estimate), duration=float(duration), state="rendering")
         write_status()
         require_space(job, destination.parent, estimate)
@@ -295,7 +332,7 @@ def export_project(
             require_space(
                 job,
                 destination.parent,
-                replace(estimate, segments=math.ceil(estimate.segments * remaining)),
+                replace(estimate, segments=math.ceil(render_estimate * remaining) + overlay_bytes),
             )
 
             def on_clip(seconds: float) -> None:
@@ -304,7 +341,9 @@ def export_project(
                     "rendering",
                     index + 1,
                     part,
-                    0.9 * (float(completed) + part * float(plan.duration)) / float(duration),
+                    render_weight
+                    * (float(completed) + part * float(plan.duration))
+                    / float(duration),
                     f"Rendering clip {index + 1}/{len(plans)}",
                 )
 
@@ -314,6 +353,38 @@ def export_project(
             segments.append(result.path)
             on_clip(float(plan.duration))
             completed += plan.duration
+        if overlay_source:
+            check_cancelled(cancel)
+            if file_identity(overlay_source.path) != overlay_source.cache.identity:
+                raise RenderError("Overlay source changed during export.")
+            overlay_path = job / "overlay.wav"
+            command = normalize_overlay_command(ffmpeg, overlay_source, overlay_path, duration)
+            state.update(state="preparing_audio", audio_command=list(progress_command(command)))
+            write_status()
+
+            def on_audio(seconds: float) -> None:
+                part = min(1.0, seconds / overlay_duration(overlay_source, duration))
+                report(
+                    "preparing_audio",
+                    fraction=0.85 + 0.05 * part,
+                    message="Preparing overlay audio",
+                )
+
+            code = run_ffmpeg(command, job / "overlay.log", cancel=cancel, progress=on_audio)
+            if code:
+                raise RenderError(
+                    f"Overlay preparation failed (FFmpeg {code}). See {job / 'overlay.log'}"
+                )
+            normalized = probe_media(overlay_path)
+            if not normalized.audio or (
+                normalized.audio[0].codec,
+                normalized.audio[0].sample_rate,
+                normalized.audio[0].channels,
+            ) != ("pcm_s24le", 48000, 2):
+                raise RenderError("Prepared overlay audio has an unexpected format.")
+            if file_identity(overlay_source.path) != overlay_source.cache.identity:
+                raise RenderError("Overlay source changed during preparation.")
+            check_cancelled(cancel)
         # Relative generated paths keep concat scripts safe even with quotes/unicode in user paths.
         playlist = job / "sequence.ffconcat"
         playlist.write_text(
@@ -327,7 +398,7 @@ def export_project(
         check_cancelled(cancel)
         staged_dir = Path(tempfile.mkdtemp(prefix=".stitch-export-", dir=destination.parent))
         staged = staged_dir / ("output" + destination.suffix.lower())
-        command = concat_command(ffmpeg, playlist, staged, project, duration)
+        command = concat_command(ffmpeg, playlist, staged, project, duration, overlay_path)
         state.update(state="assembling", command=list(progress_command(command)))
         write_status()
 
@@ -335,7 +406,9 @@ def export_project(
             report(
                 "assembling",
                 fraction=0.9 + 0.09 * min(1, seconds / float(duration)),
-                message="Joining video and encoding delivery audio",
+                message="Joining video and mixing delivery audio"
+                if overlay_source
+                else "Joining video and encoding delivery audio",
             )
 
         code = run_ffmpeg(command, job / "assembly.log", cancel=cancel, progress=on_concat)
@@ -346,7 +419,7 @@ def export_project(
         metadata = probe_media(staged)
         validate_export(metadata, project, duration)
         # Recheck every used source before publishing, not only the last rendered clip.
-        for source_id in {clip.source_id for clip in project.clips}:
+        for source_id in used_sources:
             source = sources[source_id]
             if file_identity(source.path) != source.cache.identity:
                 raise RenderError("A source changed during export. Output was not published.")
@@ -381,7 +454,7 @@ def export_project(
     finally:
         # Only explicitly owned media files are deleted. Logs and failure segments remain.
         if successful:
-            for segment in segments:
+            for segment in [*segments, *([overlay_path] if overlay_path else [])]:
                 try:
                     segment.unlink(missing_ok=True)
                 except OSError:

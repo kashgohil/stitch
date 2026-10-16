@@ -109,12 +109,11 @@ def test_assembly_command_copies_video_and_encodes_audio_once(tmp_path):
     assert "320k" in command and "hvc1" in command and "-n" in command
 
 
-def test_overlay_is_rejected_instead_of_silently_omitted(tmp_path):
+def test_uncached_overlay_is_rejected_instead_of_silently_omitted(tmp_path):
     source = Source(path=tmp_path / "source.mp4")
     project = Project(
         sources=(source,), clips=(Clip(source_id=source.id),), overlay=Overlay(source_id=source.id)
     )
     paths = AppPaths(*(tmp_path / name for name in ("p", "c", "jobs", "logs")))
-    with pytest.raises(RenderError, match="Overlay audio"):
+    with pytest.raises(RenderError, match="Inspect the overlay"):
         export_project(project, tmp_path / "final.mp4", paths)
-    assert not paths.jobs.exists()

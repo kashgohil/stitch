@@ -7,6 +7,9 @@ from pathlib import Path
 
 from stitch.models import Clip, Crop, OutputSettings, Project, Source, VideoStream
 
+# Disable makeup gain and compensate the look-ahead delay.
+PEAK_LIMITER = "alimiter=limit=0.95:level=0:latency=1"
+
 
 class RenderError(ValueError):
     """A segment cannot be rendered safely with the current settings."""
@@ -151,7 +154,7 @@ def build_segment_plan(
             f";[0:{audio.index}]atrim=start={decimal(origin)}:end={decimal(absolute_end)},"
             f"asetpts=PTS-({decimal(origin)})/TB,"
             "aresample=48000:async=1:first_pts=0:osf=dbl:ochl=stereo,"
-            f"volume={clip.audio.gain_db:g}dB:precision=double,aresample=osf=s32,"
+            f"volume={clip.audio.gain_db:g}dB:precision=double,{PEAK_LIMITER},aresample=osf=s32,"
             f"apad=whole_len={audio_samples},"
             f"atrim=end_sample={audio_samples},asetpts=N/SR/TB[a]"
         )
