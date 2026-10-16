@@ -51,6 +51,10 @@ def run_smoke(directory: Path) -> int:
             env=external_tool_environment(),
         )
     app = QApplication([])
+    footage = directory / "footage"
+    footage.mkdir()
+    for name in ("clip10.mp4", "clip2.mp4"):
+        shutil.copyfile(video, footage / name)
     app.setApplicationName("Stitch")
     window = MainWindow(paths)
     window.show()
@@ -71,7 +75,7 @@ def run_smoke(directory: Path) -> int:
         window.output_editor.profile.setCurrentIndex(window.output_editor.profile.findData(profile))
         window.apply_edits()
         suffix = ".mov" if profile == "prores_hq" else ".mp4"
-        window.start_export(directory / (profile + suffix))
+        window.start_export(footage / (profile + suffix))
         stage[0] = "export"
 
     def tick():
@@ -82,10 +86,14 @@ def run_smoke(directory: Path) -> int:
                 if window._worker is None or window._worker.isRunning():
                     return
                 assert window.tools_ready, window.details.toPlainText()
-                window.import_paths([video, video])
+                window.import_folder_path(footage)
                 stage[0] = "import"
             elif stage[0] == "import" and not window._importing:
                 assert len(window.document.project.clips) == 2, window.error.toPlainText()
+                assert [window.table.item(i, 0).text() for i in range(2)] == [
+                    "clip2.mp4",
+                    "clip10.mp4",
+                ]
                 window.move_selected(-1)
                 editor = window.clip_editor
                 editor.start.setValue(0.1)
@@ -107,6 +115,10 @@ def run_smoke(directory: Path) -> int:
                 expected = window.document.project
                 window.new_project()
                 assert window.open_path(project_file) and window.document.project == expected
+                window.refresh_selected_folder()
+                stage[0] = "refresh"
+            elif stage[0] == "refresh" and not window._importing:
+                assert len(window.document.project.clips) == 2, window.error.toPlainText()
                 window.sequence_tabs.setCurrentIndex(1)
                 window.preview.mute.setChecked(True)
                 window.preview.start_generation()
@@ -135,6 +147,10 @@ def run_smoke(directory: Path) -> int:
                         "metadata": worker.result.metadata.model_dump(mode="json"),
                     }
                 )
+                window.refresh_selected_folder()
+                stage[0] = "export_refresh"
+            elif stage[0] == "export_refresh" and not window._importing:
+                assert len(window.document.project.clips) == 2, window.error.toPlainText()
                 next_export()
             if stage[0] == "finish":
                 window.stop_import()

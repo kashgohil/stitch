@@ -5,7 +5,8 @@ audio to long-form video. The current build includes the desktop shell, media-to
 checks, a clip queue with trim/crop and source-audio controls, output settings,
 atomic save/open, cached media probing, and full-sequence software export with
 progress, cancellation, configurable crossfades, and one music/voice-over overlay. Selected clips can be
-inspected through cached, low-resolution proxies.
+inspected through cached, low-resolution proxies. Folder import and manual refresh
+can populate the queue without selecting every video individually.
 
 ## Setup and launch
 
@@ -122,6 +123,55 @@ Reimporting an existing source refreshes its metadata and adds another clip;
 incompatible refreshed metadata is rejected. Relinking is not implemented yet.
 Tests cover short 4K/8K render and proxy fixtures, not sustained native-resolution
 playback or multi-hour high-resolution export performance.
+
+## Import and refresh a folder
+
+Choose **Import folder…** to scan its immediate files in the background. Candidates
+are appended in natural filename order (`clip1`, `clip2`, `clip10`); ties use the
+filename so filesystem enumeration order cannot change the result. New projects
+match the first successful import unless output settings were already changed.
+Review, reorder, trim, crop, or remove clips before explicitly choosing **Export…**.
+Import never starts an export, and there is no continuous folder watcher.
+
+**Refresh folder** appends newly discovered videos without reordering existing
+clips or replacing trims, crops, audio settings, overlay, or crossfade settings.
+The selected folder and successful import identities are saved in the project.
+Removing a clip does not erase this history: refresh after save/reopen will not
+restore it. Selecting another folder retains the earlier folder's history.
+Files already present as project sources are not duplicated by discovery.
+
+To deliberately re-import a removed or changed file, use **Add videos…**. It adds
+another clip and refreshes that source's metadata only if existing edits remain
+valid. Refresh itself reports changed or missing sources without updating their
+cached metadata or deleting queue entries. Renamed files/hard links with the same
+known filesystem identity are skipped; history is not a content-hash deduplicator.
+A copied file with a new path and identity is treated as new footage.
+
+Discovery considers `.mp4`, `.mov`, `.mkv`, `.webm`, `.avi`, `.m4v`, `.mts`, `.m2ts`,
+`.mpeg`, `.mpg`, `.ts`, `.wmv`, `.flv`, `.3gp`, `.3g2`, `.mxf`, `.vob`, `.ogv`, and
+`.ogm`, case-insensitively. ffprobe checks whether a candidate actually contains
+video; codec support still depends on the installed tools. Hidden files,
+subdirectories, symbolic links, special files, other suffixes, and audio-only
+candidates are skipped. Use individual-file import for other video suffixes.
+Unreadable/corrupt candidates are reported by name while other imports continue.
+An empty folder produces an empty import; an inaccessible folder leaves the prior
+folder and queue intact. The status bar reports imported, skipped, and problem
+counts; details appear in the editing-error panel.
+
+New Stitch exports, diagnostic segments, and proxies contain a generated-media
+comment marker. Folder discovery skips these even when exported or copied into
+the source folder, including after reopening the project. App-managed proxy/job
+directories are also excluded. Untagged exports made by older builds, or files
+whose marker was stripped by another program, cannot be identified automatically;
+keep those outside the source folder or remove them from the reviewed queue.
+**Add videos…** can explicitly import marked media when that is intentional.
+
+**Stop import** stops directory discovery or finishes the current metadata probe
+(up to 30 seconds), then retains only completed imports. Refresh resumes without
+duplicating those imports. Scan/probe work stays off the UI thread; sorting stores
+filenames, not decoded media. Import/refresh never changes or deletes source files.
+Crossfade validation applies to new clips too: a clip that cannot accommodate the
+overlaps is reported and not added to the queue/history.
 
 ## Inspect a clip with a proxy
 
@@ -424,6 +474,9 @@ exercise all profiles, and check cancellation, output guards, and retained diagn
 Crossfade tests inspect blended pixels and tone gains, middle clips without a body,
 fractional output rates, missing/muted audio, shortened overlays, original-only
 encoder inputs, and 4K/8K at 120 fps across all three export profiles.
+Folder checks cover natural ordering, durable removal history, explicit re-import,
+changed/missing/unreadable files, cancellation, nonrecursive discovery, copied
+proxies, and same-folder exports with hard cuts/crossfades across all profiles.
 Proxy tests cover both cache qualities, delayed audio and nonzero source clocks,
 4K/8K HEVC input, source/cache invalidation, cancellation, and original-only export.
 Qt tests exercise background cancellation, source-time trim markers, real proxy
@@ -505,6 +558,7 @@ Proxy logs and diagnostic/build artifacts are retained until removed manually.
 - `src/stitch/project_io.py`: versioned reads and atomic writes.
 - `src/stitch/media.py`: local ffprobe adapter and stream metadata normalization.
 - `src/stitch/sources.py`: import services and cache freshness checks.
+- `src/stitch/folders.py`: natural-order discovery, source/history checks, and manual refresh.
 - `src/stitch/render_plan.py`: pure segment command generation and encoder profiles.
 - `src/stitch/render.py`: isolated single-segment execution, diagnostics, and validation.
 - `src/stitch/joins.py`: original-only body/overlap plans and bounded crossfade rendering.

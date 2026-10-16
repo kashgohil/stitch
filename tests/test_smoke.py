@@ -38,5 +38,8 @@ def test_gui_smoke_runner_exports_all_profiles(tmp_path):
     saved = json.loads((directory / "projects" / "smoke.json").read_text())
     assert saved["output"]["join_mode"] == "crossfade"
     assert saved["output"]["crossfade_duration"] == 0.2
+    assert saved["folder"] == str(directory / "footage")
+    assert len(saved["folder_history"]) == 2 and len(saved["clips"]) == 2
     for profile in report["profiles"]:
         assert profile["metadata"]["video"]["duration"] == pytest.approx(2.6, abs=0.000001)
+        assert profile["metadata"]["stitch_generated"]
