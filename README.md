@@ -4,7 +4,8 @@ A desktop video assembler for arranging, trimming, and cropping clips and adding
 audio to long-form video. The current build includes the desktop shell, media-tool
 checks, a clip queue with trim/crop and source-audio controls, output settings,
 atomic save/open, cached media probing, and full-sequence software export with
-progress, cancellation, and one music/voice-over overlay. Preview is the next issue.
+progress, cancellation, and one music/voice-over overlay. Selected clips can be
+inspected through cached, low-resolution proxies.
 
 ## Setup and launch
 
@@ -70,8 +71,59 @@ This prints the resolved tools and storage paths. Exit code 0 means setup passed
 The Source column flags missing or changed files without removing their edits.
 Reimporting an existing source refreshes its metadata and adds another clip;
 incompatible refreshed metadata is rejected. Relinking is not implemented yet.
-There is no playback yet. Tests cover short 4K/8K render fixtures, not sustained
-high-resolution playback or multi-hour high-resolution export performance.
+Tests cover short 4K/8K render and proxy fixtures, not sustained native-resolution
+playback or multi-hour high-resolution export performance.
+
+## Inspect a clip with a proxy
+
+1. Select a clip in **Clips**, then open **Selected clip preview**.
+2. Choose **720p** or **1080p**, then **Generate proxy**. Generation runs in a
+   background worker with progress and **Cancel proxy**. It processes the entire
+   source, not just the trimmed interval, so later trim changes reuse the same
+   proxy. Large sources can take significant time to prepare.
+3. Use **Play clip** / **Pause** and the seek slider. Playback starts at the
+   applied in-point and pauses at the out-point; seeking can inspect the entire
+   source. **Set in** / **Set out** copy the current source time into draft trim
+   fields. Apply the changes to validate them and update the playback interval.
+
+Preview uses H.264 8-bit SDR, 30 fps, and AAC stereo 48 kHz at 128 kbit/s, regardless
+of the export profile. The picture is rotated and fitted into a 1280×720 or
+1920×1080 square-pixel canvas, with padding and no upscaling. High-FPS footage is
+temporally downsampled for inspection. The preview does **not** simulate crop,
+source gain/mute, overlay audio, or final export color/quality; **Mute preview**
+affects only local playback. HDR sources are rejected, as with the current exporter.
+There is no full-sequence playback, frame stepping, or frame-accurate seek yet.
+
+Proxy time zero corresponds to the original video's start, including media with
+nonzero container timestamps; relative audio delay is preserved. Trim decisions
+remain in original-source seconds and crop decisions remain in original pixels.
+Export always resolves the project's original sources, never the preview cache.
+Changing proxy quality cannot change output resolution, frame rate, or audio quality.
+
+Valid proxies are reused across clips and project reopen without transcoding.
+Choose the same quality to reuse a 1080p proxy; the preview selector defaults to
+720p and is not a project setting. Cache keys include source path, file identity,
+cached metadata, resolution, and recipe version. Cache entries also record the
+generated file's identity. Missing or modified entries are not played.
+
+A changed or missing original stops preview rather than displaying stale media.
+Reimport a changed source to refresh its metadata, then generate its new proxy.
+Reimport also adds a queue entry; remove the extra entry if it is not wanted.
+Existing edits are preserved, and incompatible source metadata is rejected.
+Switching sources or proxy quality cancels obsolete generation; import/export
+also cancels generation and pauses playback to avoid competing media work.
+Closing waits for the worker to stop. Encoding cancellation is prompt; a running
+validation probe may take up to 30 seconds.
+
+Generation uses two codec/filter threads and streams media to disk. A bitrate-based
+space estimate and a 64 MiB reserve guard the cache volume; this is not a peak-memory
+or fixed-file-size guarantee. Incomplete media is removed after cancellation or
+failure, while `proxy-*.log` diagnostics remain in the logs directory. Completed
+proxies, superseded cache entries, and logs have no automatic eviction yet.
+
+Playback uses [Qt Multimedia's media player](https://doc.qt.io/qtforpython-6/PySide6/QtMultimedia/QMediaPlayer.html).
+Codec/backend availability depends on the installed Qt build and OS. Native macOS
+playback is tested; Windows/Linux playback and packaging still need validation.
 
 ## Add music or voice-over
 
@@ -283,6 +335,10 @@ These are correctness fixtures, not throughput benchmarks. Encoder-specific test
 skip when the local FFmpeg build lacks that encoder.
 Sequence tests decode both sides of joins across mixed-resolution/frame-rate clips,
 exercise all profiles, and check cancellation, output guards, and retained diagnostics.
+Proxy tests cover both cache qualities, delayed audio and nonzero source clocks,
+4K/8K HEVC input, source/cache invalidation, cancellation, and original-only export.
+Qt tests exercise background cancellation, source-time trim markers, real proxy
+video decoding/playback/seeking, and cache reuse after reopening a project.
 A macOS spot check using 160×90, 12 fps generated video at 60 versus 600 seconds
 observed sampled RSS of about 35→41 MiB for Python and 29→35 MiB for FFmpeg.
 This checks duration scaling at low resolution, not peak-memory guarantees or
@@ -310,7 +366,9 @@ FFmpeg is supplied locally, not bundled with this prototype.
 - `src/stitch/window.py`: clip queue, project actions, and background startup checks.
 - `src/stitch/editors.py`: validated trim/crop, source-audio, and output draft controls.
 - `src/stitch/document.py`: immutable editing operations and save-point tracking.
-- `src/stitch/workers.py`: cancellable, sequential background import.
+- `src/stitch/workers.py`: background import, export, and cancellable proxy generation.
+- `src/stitch/preview.py`: Qt proxy playback, source-time inspection, and trim markers.
+- `src/stitch/proxy.py`: identity-keyed preview cache and bounded software transcoding.
 - `src/stitch/dependencies.py`: executable discovery and bounded version probes.
 - `src/stitch/paths.py`: application storage and isolated job directories.
 - `src/stitch/models.py`: validated project and media models; generated JSON Schema.
@@ -325,4 +383,4 @@ FFmpeg is supplied locally, not bundled with this prototype.
 - `tests/`: model, storage, source-cache, media integration, CLI, and Qt lifecycle checks.
 
 Plan: [DOC-62 — Stitch weekend plan](https://rezee.app/kash/docs/62).
-Next: [ISSUE-1148 — Proxy preview](https://rezee.app/kash/plan/1148).
+Next: [ISSUE-1149 — Validation and packaging](https://rezee.app/kash/plan/1149).
