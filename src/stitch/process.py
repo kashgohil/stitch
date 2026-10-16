@@ -8,6 +8,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from stitch.render_plan import RenderError
+from stitch.tool_setup import external_tool_environment
 
 
 class RenderCancelled(RenderError):
@@ -41,6 +42,7 @@ def run_ffmpeg(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=log,
+            env=external_tool_environment(),
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
 

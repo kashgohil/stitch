@@ -56,6 +56,33 @@ def import_clips(window, qtbot, tmp_path, count=1):
     return paths
 
 
+def test_choose_media_tools_folder_is_saved_and_rechecked(window, qtbot, monkeypatch, tmp_path):
+    import json
+    import os
+
+    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
+    directory = tmp_path / "selected tools"
+    directory.mkdir()
+    for name in ("ffmpeg", "ffprobe"):
+        executable = directory / name
+        executable.write_bytes(b"test placeholder; mocked dependency check")
+        executable.chmod(0o755)
+    monkeypatch.setattr("stitch.window.QFileDialog.getExistingDirectory", lambda *a: str(directory))
+    window.choose_tools.click()
+    qtbot.waitUntil(lambda: window.tools_ready)
+    preference = window.paths.projects.parent / "media-tools.json"
+    assert json.loads(preference.read_text())["directory"] == str(directory)
+    assert os.environ["PATH"].split(os.pathsep)[0] == str(directory)
+    assert not window.document.dirty
+
+
+def test_invalid_media_tools_folder_shows_error(window, monkeypatch, tmp_path):
+    monkeypatch.setattr("stitch.window.QFileDialog.getExistingDirectory", lambda *a: str(tmp_path))
+    window.choose_tools.click()
+    assert "ffmpeg" in window.error.toPlainText()
+    assert not (window.paths.projects.parent / "media-tools.json").exists()
+
+
 def test_ten_clips_edits_reorder_and_save_reopen(window, qtbot, tmp_path):
     import_clips(window, qtbot, tmp_path, 10)
     assert window.document.project.output.frame_rate == "120000/1001"

@@ -5,6 +5,8 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
+from stitch.tool_setup import external_tool_environment
+
 
 @dataclass(frozen=True)
 class ToolStatus:
@@ -20,7 +22,10 @@ class ToolStatus:
 
 def installation_help() -> str:
     if sys.platform == "darwin":
-        return "Install FFmpeg with Homebrew: brew install ffmpeg. Then click Check again."
+        return (
+            "FFmpeg is installed separately. Choose its folder if already installed, or install "
+            "with Homebrew: brew install ffmpeg. Then click Check again."
+        )
     if sys.platform == "win32":
         return (
             "Install an FFmpeg build containing ffmpeg.exe and ffprobe.exe, "
@@ -47,6 +52,7 @@ def probe_tool(name: str, *, timeout: float = 5.0) -> ToolStatus:
             errors="replace",
             timeout=timeout,
             check=False,
+            env=external_tool_environment(),
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
     except subprocess.TimeoutExpired:

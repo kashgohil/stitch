@@ -12,6 +12,7 @@ from pathlib import Path
 
 from stitch.dependencies import installation_help, probe_tools
 from stitch.paths import AppPaths
+from stitch.tool_setup import configure_media_tools
 
 
 def configure_logging(paths: AppPaths) -> None:
@@ -53,6 +54,12 @@ def main(argv: list[str] | None = None) -> int:
         help="One-based clip number for --render-clip (default: 1)",
     )
     commands.add_argument("--export", type=Path, metavar="PROJECT", help="Export a saved sequence")
+    commands.add_argument(
+        "--smoke-test",
+        type=Path,
+        metavar="NEW_DIRECTORY",
+        help="Run the GUI package check with generated fixtures in a new directory",
+    )
     parser.add_argument("--output", type=Path, metavar="FILE", help="Final path for --export")
     parser.add_argument(
         "--overwrite", action="store_true", help="Allow --export to replace its output"
@@ -62,6 +69,16 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--clip-index requires --render-clip and a positive one-based number")
     if bool(args.export) != bool(args.output) or (args.overwrite and not args.export):
         parser.error("--export requires --output; --output and --overwrite require --export")
+    if args.smoke_test:
+        from stitch.smoke import run_smoke
+
+        try:
+            return run_smoke(args.smoke_test)
+        except (OSError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+    paths = AppPaths.default()
+    configure_media_tools(paths)
     if args.probe or args.inspect_project or args.project_schema:
         from stitch.media import MediaError, probe_media
         from stitch.models import Project
@@ -92,7 +109,6 @@ def main(argv: list[str] | None = None) -> int:
             print(str(exc), file=sys.stderr)
             return 1
         return 0
-    paths = AppPaths.default()
     try:
         paths.ensure()
         configure_logging(paths)

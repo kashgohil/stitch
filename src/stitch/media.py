@@ -11,6 +11,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from stitch.models import AudioStream, FileIdentity, MediaMetadata, VideoStream, rational
+from stitch.tool_setup import external_tool_environment
 
 
 class MediaError(ValueError):
@@ -199,6 +200,7 @@ def probe_media(path: Path, *, timeout: float = 30.0) -> MediaMetadata:
             encoding="utf-8",
             errors="replace",
             check=False,
+            env=external_tool_environment(),
             timeout=timeout,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )

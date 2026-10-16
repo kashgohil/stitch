@@ -42,6 +42,7 @@ from stitch.paths import AppPaths
 from stitch.preview import PreviewPanel
 from stitch.project_io import ProjectError
 from stitch.sources import source_status
+from stitch.tool_setup import save_tool_directory
 from stitch.workers import ExportWorker, ImportWorker
 
 logger = logging.getLogger(__name__)
@@ -210,6 +211,9 @@ class MainWindow(QMainWindow):
         self.retry = QPushButton("Check again")
         self.retry.clicked.connect(self.check_dependencies)
         buttons.addWidget(self.retry)
+        self.choose_tools = QPushButton("Choose FFmpeg folder…")
+        self.choose_tools.clicked.connect(self.choose_tool_directory)
+        buttons.addWidget(self.choose_tools)
         logs = QPushButton("Open logs")
         logs.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(paths.logs))))
         buttons.addWidget(logs)
@@ -274,6 +278,7 @@ class MainWindow(QMainWindow):
         self.overlay_editor.add.setEnabled(idle and self.tools_ready)
         self.export.setEnabled(idle and self.tools_ready and bool(self.document.project.clips))
         self.retry.setEnabled(idle and self._worker is not None and not self._worker.isRunning())
+        self.choose_tools.setEnabled(idle and not (self._worker and self._worker.isRunning()))
         self.cancel_import.setVisible(self._importing)
         row = self.table.currentRow()
         self.up.setEnabled(idle and row > 0)
@@ -604,6 +609,23 @@ class MainWindow(QMainWindow):
             logger.info("%s: %s (%s)", tool.name, tool.version or tool.error, tool.path)
         if self._closing:
             self.close()
+
+    @Slot()
+    def choose_tool_directory(self) -> None:
+        if self.busy or self.preview.worker or (self._worker and self._worker.isRunning()):
+            return
+        folder = QFileDialog.getExistingDirectory(
+            self, "Choose folder containing ffmpeg and ffprobe"
+        )
+        if not folder:
+            return
+        try:
+            save_tool_directory(Path(folder), self.paths)
+        except (ValueError, OSError) as exc:
+            self._show_error(str(exc))
+            return
+        self._show_error("")
+        self.check_dependencies()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if not self.preview.shutdown():
