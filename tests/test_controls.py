@@ -180,6 +180,79 @@ def test_manual_output_not_replaced_by_import(window, qtbot, tmp_path):
     assert window.document.project.output.frame_rate == "24/1"
 
 
+def test_folder_dialog_refresh_and_reopen_keep_reviewed_queue(window, qtbot, tmp_path, monkeypatch):
+    folder = tmp_path / "folder with spaces"
+    folder.mkdir()
+    for i in (10, 2, 1):
+        (folder / f"clip{i}.mp4").write_bytes(b"original")
+    assert not window.refresh_folder.isEnabled()
+    monkeypatch.setattr("stitch.window.QFileDialog.getExistingDirectory", lambda *a: str(folder))
+    window.add_folder.click()
+    qtbot.waitUntil(lambda: not window._importing)
+    assert [window.table.item(i, 0).text() for i in range(3)] == [
+        "clip1.mp4",
+        "clip2.mp4",
+        "clip10.mp4",
+    ]
+    assert window.refresh_folder.isEnabled() and str(folder) in window.folder_label.text()
+    window.clip_editor.start.setValue(1)
+    window.up.click()
+    window.remove.click()  # Removed clip10 must not return on refresh.
+    before = window.document.project
+    saved = tmp_path / "folder.json"
+    assert window.save_to_path(saved)
+    window.new_project()
+    assert not window.refresh_folder.isEnabled()
+    assert window.open_path(saved)
+    (folder / "clip11.mp4").write_bytes(b"new original")
+    window.refresh_folder.click()
+    qtbot.waitUntil(lambda: not window._importing)
+    assert window.document.project.clips[:-1] == before.clips
+    assert window.table.rowCount() == 3
+    assert window.table.item(2, 0).text() == "clip11.mp4"
+    assert not window._exporting
+    window.refresh_folder.click()
+    qtbot.waitUntil(lambda: not window._importing)
+    assert window.table.rowCount() == 3
+    assert "Imported 0" in window.statusBar().currentMessage()
+
+
+def test_folder_probe_and_discovery_run_off_ui_thread_and_cancel(
+    window, qtbot, tmp_path, monkeypatch, metadata
+):
+    started, release = threading.Event(), threading.Event()
+    thread_ids = []
+    from stitch.folders import scan_folder
+
+    def scan(*args, **kwargs):
+        thread_ids.append(threading.get_ident())
+        return scan_folder(*args, **kwargs)
+
+    def probe(_):
+        thread_ids.append(threading.get_ident())
+        started.set()
+        release.wait(timeout=5)
+        return metadata
+
+    monkeypatch.setattr("stitch.workers.scan_folder", scan)
+    monkeypatch.setattr("stitch.sources.probe_media", probe)
+    for i in range(3):
+        (tmp_path / f"clip{i}.mp4").write_bytes(b"original")
+    try:
+        window.import_folder_path(tmp_path)
+        qtbot.waitUntil(started.is_set)
+        assert not window.add_folder.isEnabled() and not window.refresh_folder.isEnabled()
+        window.cancel_import.click()
+    finally:
+        release.set()
+        qtbot.waitUntil(lambda: not window._importing)
+    assert all(t != threading.get_ident() for t in thread_ids)
+    assert len(window.document.project.clips) == 1
+    assert len(window.document.project.folder_history) == 1
+    assert "Stopped" in window.statusBar().currentMessage()
+    assert window.add_folder.isEnabled() and window.refresh_folder.isEnabled()
+
+
 def test_crossfade_controls_validation_and_round_trip(window, qtbot, tmp_path):
     import_clips(window, qtbot, tmp_path, 3)
     editor = window.output_editor

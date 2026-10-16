@@ -113,6 +113,20 @@ def test_manual_imports_overlay_and_folder_switch_keep_history(folder, tmp_path)
     assert scan_folder(project, folder).imported == 0
 
 
+def test_existing_overlay_in_folder_is_not_reported_missing(folder, metadata, monkeypatch):
+    project = scan_folder(Project(), folder).project
+    overlay = folder / "music.wav"
+    overlay.write_bytes(b"overlay")
+    monkeypatch.setattr(
+        "stitch.sources.probe_media", lambda _: metadata.model_copy(update={"video": None})
+    )
+    project = set_overlay(project, overlay)
+    result = scan_folder(project, folder)
+    assert not result.errors and result.project == project
+    overlay.unlink()
+    assert any("music.wav: missing" in e for e in scan_folder(project, folder).errors)
+
+
 def test_candidates_ignore_nested_links_hidden_files_and_generated_media(
     folder, metadata, monkeypatch
 ):

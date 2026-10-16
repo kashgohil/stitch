@@ -8,6 +8,7 @@ from PySide6.QtCore import QThread, Signal
 
 from stitch.document import match_first_clip
 from stitch.export import export_project
+from stitch.folders import scan_folder
 from stitch.models import Project, Source
 from stitch.paths import AppPaths
 from stitch.process import RenderCancelled
@@ -48,6 +49,7 @@ class ProxyWorker(QThread):
 
 class ImportWorker(QThread):
     progress = Signal(int, int, str)
+    discovery = Signal(str)
 
     def __init__(
         self,
@@ -57,6 +59,8 @@ class ImportWorker(QThread):
         parent=None,
         *,
         is_overlay: bool = False,
+        folder: Path | None = None,
+        excluded_roots: tuple[Path, ...] = (),
     ):
         super().__init__(parent)
         self.project = project
@@ -65,8 +69,32 @@ class ImportWorker(QThread):
         self.errors: list[str] = []
         self.imported = 0
         self.is_overlay = is_overlay
+        self.folder = folder
+        self.excluded_roots = excluded_roots
+        self.skipped = 0
+        self.cancelled = False
 
     def run(self) -> None:
+        if self.folder is not None:
+            try:
+                result = scan_folder(
+                    self.project,
+                    self.folder,
+                    excluded_roots=self.excluded_roots,
+                    cancelled=self.isInterruptionRequested,
+                    progress=self.progress.emit,
+                    discovery=self.discovery.emit,
+                    match_output=self.match_output,
+                )
+                self.project = result.project
+                self.imported = result.imported
+                self.skipped = result.skipped
+                self.cancelled = result.cancelled
+                self.errors = result.errors
+            except Exception as exc:
+                logger.exception("Folder import failed")
+                self.errors.append(str(exc))
+            return
         for index, path in enumerate(self.paths):
             if self.isInterruptionRequested():
                 break
@@ -86,6 +114,7 @@ class ImportWorker(QThread):
             except Exception as exc:
                 logger.exception("Import failed for %s", path)
                 self.errors.append(f"{path.name}: {exc}")
+        self.cancelled = self.isInterruptionRequested()
 
 
 class ExportWorker(QThread):

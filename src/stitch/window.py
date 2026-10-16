@@ -113,6 +113,18 @@ class MainWindow(QMainWindow):
             button.clicked.connect(callback)
             toolbar.addWidget(button)
         layout.addLayout(toolbar)
+        folder_row = QHBoxLayout()
+        self.add_folder = QPushButton("Import folder…")
+        self.refresh_folder = QPushButton("Refresh folder")
+        self.folder_label = QLabel("No folder selected · manual refresh only")
+        self.folder_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.folder_label.setWordWrap(True)
+        self.add_folder.clicked.connect(self.choose_folder)
+        self.refresh_folder.clicked.connect(self.refresh_selected_folder)
+        folder_row.addWidget(self.add_folder)
+        folder_row.addWidget(self.refresh_folder)
+        folder_row.addWidget(self.folder_label, 1)
+        layout.addLayout(folder_row)
         self.summary = QLabel()
         layout.addWidget(self.summary)
         self.error = QPlainTextEdit()
@@ -274,6 +286,10 @@ class MainWindow(QMainWindow):
         for action in self.file_actions:
             action.setEnabled(idle)
         self.add.setEnabled(idle and self.tools_ready)
+        self.add_folder.setEnabled(idle and self.tools_ready)
+        self.refresh_folder.setEnabled(
+            idle and self.tools_ready and self.document.project.folder is not None
+        )
         self.overlay_editor.add.setEnabled(idle and self.tools_ready)
         self.export.setEnabled(idle and self.tools_ready and bool(self.document.project.clips))
         self.retry.setEnabled(idle and self._worker is not None and not self._worker.isRunning())
@@ -288,6 +304,11 @@ class MainWindow(QMainWindow):
     def _refresh(self, selected: UUID | None = None) -> None:
         self._refreshing = True
         project = self.document.project
+        self.folder_label.setText(
+            f"{project.folder} · immediate files only"
+            if project.folder
+            else "No folder selected · manual refresh only"
+        )
         sources = {source.id: source for source in project.sources}
         states = {source.id: source_status(source).state for source in project.sources}
         self.table.setRowCount(len(project.clips))
@@ -460,7 +481,34 @@ class MainWindow(QMainWindow):
         self.import_paths([Path(path) for path in paths])
 
     def import_paths(self, paths: list[Path], *, is_overlay: bool = False) -> None:
-        if self.busy or not self.tools_ready or not paths or not self._apply_pending():
+        if not paths:
+            return
+        self._start_import(paths, is_overlay=is_overlay)
+
+    @Slot()
+    def choose_folder(self) -> None:
+        if self.busy:
+            return
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Import video folder (immediate files only)",
+            str(self.document.project.folder or ""),
+        )
+        if folder:
+            self.import_folder_path(Path(folder))
+
+    def import_folder_path(self, folder: Path) -> None:
+        self._start_import([], folder=folder)
+
+    @Slot()
+    def refresh_selected_folder(self) -> None:
+        if self.document.project.folder is not None:
+            self.import_folder_path(self.document.project.folder)
+
+    def _start_import(
+        self, paths: list[Path], *, is_overlay: bool = False, folder: Path | None = None
+    ) -> None:
+        if self.busy or not self.tools_ready or not self._apply_pending():
             return
         if self._import_worker:
             self._import_worker.deleteLater()
@@ -473,11 +521,18 @@ class MainWindow(QMainWindow):
             not self.document.project.clips and not self.document.output_configured,
             self,
             is_overlay=is_overlay,
+            folder=folder,
+            excluded_roots=(self.paths.proxies, self.paths.jobs),
         )
         self._import_worker.progress.connect(self._import_progress)
+        self._import_worker.discovery.connect(self._import_discovery)
         self._import_worker.finished.connect(self._import_finished)
         self._update_controls()
         self._import_worker.start()
+
+    @Slot(str)
+    def _import_discovery(self, message: str) -> None:
+        self.statusBar().showMessage(message)
 
     @Slot(int, int, str)
     def _import_progress(self, current: int, total: int, name: str) -> None:
@@ -500,7 +555,7 @@ class MainWindow(QMainWindow):
             self.document.output_configured = True
         selected = (
             self._selected
-            if worker.is_overlay
+            if worker.is_overlay or (worker.folder is not None and self._selected)
             else (worker.project.clips[-1].id if worker.project.clips else None)
         )
         self._refresh(selected)
@@ -508,7 +563,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             ("Overlay audio imported." if worker.imported else "Overlay audio was not changed.")
             if worker.is_overlay
-            else f"Imported {worker.imported} clips. {len(worker.errors)} failed."
+            else (
+                f"{'Stopped. ' if worker.cancelled else ''}Imported {worker.imported} clips. "
+                f"{worker.skipped} skipped; {len(worker.errors)} problems. "
+                "Review the queue before exporting."
+            )
         )
         if self._close_after_import:
             self._close_after_import = False

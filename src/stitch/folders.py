@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from stitch.document import change_project, match_first_clip
-from stitch.media import MediaError, file_identity
+from stitch.media import MediaError, MissingSourceError, file_identity
 from stitch.models import FolderEntry, Project, Source
 from stitch.sources import append_video_source, refresh_source
 
@@ -105,10 +105,15 @@ def scan_folder(
             result.cancelled = True
             return result
         if path.parent == folder and path not in present:
-            result.errors.append(
-                f"{path.name}: missing or no longer a discoverable regular file; "
-                "queue/history kept."
-            )
+            # Existing overlay/explicitly imported files may have non-candidate
+            # suffixes. Being absent from discovery does not mean they are missing.
+            try:
+                if file_identity(path) != known[path]:
+                    result.errors.append(f"{path.name}: changed; queue/history kept.")
+            except MissingSourceError:
+                result.errors.append(f"{path.name}: missing; queue/history kept.")
+            except MediaError as exc:
+                result.errors.append(f"{path.name}: {exc}; queue/history kept.")
     last_notice = 0.0
     for index, path in enumerate(candidates, 1):
         if cancelled():
