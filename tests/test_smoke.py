@@ -35,3 +35,8 @@ def test_gui_smoke_runner_exports_all_profiles(tmp_path):
     report = json.loads((directory / "smoke-report.json").read_text())
     assert report["status"] == "passed" and report["preview_frame_decoded"]
     assert [p["profile"] for p in report["profiles"]] == ["h264", "hevc_main10", "prores_hq"]
+    saved = json.loads((directory / "projects" / "smoke.json").read_text())
+    assert saved["output"]["join_mode"] == "crossfade"
+    assert saved["output"]["crossfade_duration"] == 0.2
+    for profile in report["profiles"]:
+        assert profile["metadata"]["video"]["duration"] == pytest.approx(2.6, abs=0.000001)

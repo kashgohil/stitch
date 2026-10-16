@@ -73,10 +73,9 @@ class MemorySampler:
         }
 
 
-def inspect_markers(path, seconds):
+def inspect_markers(path, markers):
     """Decode bounded windows near the start, middle, and end, including a clip join."""
     results = []
-    markers = sorted({5, 300 if seconds > 305 else 5, int(seconds // 10) * 5, int(seconds) - 5})
     for marker in markers:
         start = marker - 0.25  # Exactly three 12-fps frames before the flash.
         audio = array.array(
@@ -132,7 +131,7 @@ def inspect_markers(path, seconds):
         assert abs(video_error) <= 1 / 12, (marker, video_error)
         results.append(
             {
-                "source_marker_seconds": marker,
+                "output_marker_seconds": marker,
                 "audio_error_ms": round(audio_error * 1000, 3),
                 "video_error_ms": round(video_error * 1000, 3),
             }
@@ -140,7 +139,7 @@ def inspect_markers(path, seconds):
     return results
 
 
-def run(seconds: int, directory: Path):
+def run(seconds: int, directory: Path, crossfade: float = 0):
     paths = AppPaths(*(directory / name for name in ("projects", "proxies", "jobs", "logs")))
     paths.ensure()
     source = directory / "pulse source.mov"
@@ -187,11 +186,30 @@ def run(seconds: int, directory: Path):
             Clip(source_id=base.sources[0].id, out_point=min(300, duration - i))
             for i in range(0, duration, 300)
         )
-        return change_project(base, clips=clips)
+        return change_project(
+            base,
+            clips=clips,
+            output=base.output.model_copy(
+                update={
+                    "join_mode": "crossfade" if crossfade else "hard_cut",
+                    "crossfade_duration": crossfade,
+                }
+            ),
+        )
 
     reports = []
     for duration in (60, seconds):
         project = composition(duration)
+        overlap = float(project.output.overlap_duration)
+        expected_duration = duration - overlap * (len(project.clips) - 1)
+        markers = sorted(
+            {
+                5,
+                305 - overlap if duration > 305 else 5,
+                (len(project.clips) // 2) * (300 - overlap) + 5,
+                expected_duration - 5,
+            }
+        )
         save_project(project, paths.projects / f"{duration}.json")
         sampler = MemorySampler()
         sampler.thread.start()
@@ -211,14 +229,15 @@ def run(seconds: int, directory: Path):
         finally:
             memory = sampler.result()
         metadata = probe_media(result.path)
-        assert math.isclose(metadata.video.duration, duration, abs_tol=0.001)
-        assert math.isclose(metadata.audio[0].duration, duration, abs_tol=0.025)
+        assert math.isclose(metadata.video.duration, expected_duration, abs_tol=0.001)
+        assert math.isclose(metadata.audio[0].duration, expected_duration, abs_tol=0.025)
         reports.append(
             {
-                "duration_seconds": duration,
+                "source_duration_seconds": duration,
+                "duration_seconds": expected_duration,
                 "elapsed_seconds": round(time.monotonic() - started, 2),
                 "memory": memory,
-                "markers": inspect_markers(result.path, duration),
+                "markers": inspect_markers(result.path, markers),
                 "output": str(result.path),
                 "job": str(result.job),
             }
@@ -271,6 +290,7 @@ def run(seconds: int, directory: Path):
         "runs": reports,
         "cancel_latency_seconds": round(latency, 3),
         "cancelled_active_encoder": True,
+        "crossfade_seconds": crossfade,
         "scope": "Low-resolution duration scaling; sampled RSS is not a peak-memory guarantee.",
     }
 
@@ -278,11 +298,19 @@ def run(seconds: int, directory: Path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seconds", type=int, default=7200)
+    parser.add_argument(
+        "--crossfade",
+        type=float,
+        default=0,
+        help="Optional overlap, 0–2 seconds (rounded to 12-fps frames)",
+    )
     args = parser.parse_args()
     if args.seconds < 60 or args.seconds % 5:
         parser.error("--seconds must be at least 60 and a multiple of five")
+    if not 0 <= args.crossfade <= 2:
+        parser.error("--crossfade must be between zero and two seconds")
     directory = Path(tempfile.mkdtemp(prefix="stitch-endurance-"))
     print(f"Artifacts: {directory}", flush=True)
-    report = run(args.seconds, directory)
+    report = run(args.seconds, directory, args.crossfade)
     (directory / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2), flush=True)

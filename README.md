@@ -4,7 +4,7 @@ A desktop video assembler for arranging, trimming, and cropping clips and adding
 audio to long-form video. The current build includes the desktop shell, media-tool
 checks, a clip queue with trim/crop and source-audio controls, output settings,
 atomic save/open, cached media probing, and full-sequence software export with
-progress, cancellation, and one music/voice-over overlay. Selected clips can be
+progress, cancellation, configurable crossfades, and one music/voice-over overlay. Selected clips can be
 inspected through cached, low-resolution proxies.
 
 ## Setup and launch
@@ -107,6 +107,8 @@ The destination must not exist. The check leaves fixtures, exports, logs, and
    unless you have already changed the output settings. Odd source dimensions
    round up to even output dimensions. Exports use software encoders; local
    FFmpeg must include the encoder for the selected profile.
+   Choose **Hard cut** or **Crossfade** under **Join**; **Overlap** sets the
+   transition duration. Apply output settings to validate the whole sequence.
 5. **Save** or **Save as…** writes a `.json` project. **Open…** restores the queue
    and settings. An asterisk in the title indicates unsaved changes or pending
    edits. New, Open, and Close prompt to save, discard, or cancel when necessary.
@@ -137,7 +139,7 @@ Preview uses H.264 8-bit SDR, 30 fps, and AAC stereo 48 kHz at 128 kbit/s, regar
 of the export profile. The picture is rotated and fitted into a 1280×720 or
 1920×1080 square-pixel canvas, with padding and no upscaling. High-FPS footage is
 temporally downsampled for inspection. The preview does **not** simulate crop,
-source gain/mute, overlay audio, or final export color/quality; **Mute preview**
+source gain/mute, crossfades, overlay audio, or final export color/quality; **Mute preview**
 affects only local playback. HDR sources are rejected, as with the current exporter.
 There is no full-sequence playback, frame stepping, or frame-accurate seek yet.
 
@@ -204,9 +206,46 @@ Mixing uses the chosen gains without automatic volume normalization. A
 latency-compensated sample-peak limiter caps source gain and the final sum at
 0.95 full scale, with no automatic makeup gain. It can reduce loud passages;
 it is not loudness mastering or a true-peak guarantee after lossy AAC encoding.
-There are no fades, ducking, placement offsets, or additional overlay tracks yet.
+There are no overlay fades, ducking, placement offsets, or additional overlay tracks yet.
 The [FFmpeg audio-filter documentation](https://ffmpeg.org/ffmpeg-filters.html#amix)
 describes the mixing and limiter behavior used here.
+
+## Crossfade joins
+
+**Output → Join → Crossfade** blends adjacent pictures and source audio after
+trim, crop, and normalization. One project-level **Overlap** applies to every
+boundary. Hard cuts remain the default, including when opening older projects.
+Zero overlap uses hard cuts; a one-clip sequence has no transition.
+
+Overlap rounds **up** to a whole output frame: 0.25 seconds at 30 fps becomes
+8 frames (about 0.267 seconds). Each end clip must contain one overlap, and
+each middle clip must contain two. Invalid trims, settings, or reorderings are
+rejected with an explanation; transitions are never silently shortened.
+Exactly touching incoming/outgoing overlaps are allowed, with no middle body.
+The resulting duration is the sum of normalized clip durations minus one rounded
+overlap per boundary. Overlay audio starts at zero and stops/loops against this
+shortened duration. Save/reopen retains both join settings.
+
+The blend is linear in the normalized SDR pixel values, with matching linear
+audio fades—not optical flow, linear-light compositing, or an equal-power audio
+curve. Source gain and mute apply before the fade; missing audio becomes silence.
+The selected-clip proxy does not preview transitions. Inspect an exported sample
+to evaluate the complete sequence.
+
+Crossfade exports render alternating non-overlapped bodies and overlap chunks
+**directly from original media**, using at most two source inputs per process.
+Each output picture has one final-profile video encode; the last assembly pass
+copies video and encodes delivery audio once. Resolution, frame rate, and the
+profile's pixel format are retained. HEVC crossfade chunks disable B-frames
+consistently to avoid an observed one-frame 8K reorder-timestamp failure; this
+trades compression efficiency for reliable short-chunk assembly, without changing
+CRF, resolution, or bit depth. Hard-cut encoding is unchanged.
+
+Chunks run sequentially with bounded media processing, cancellation, disk-space
+checks, validation, and atomic publication. To preserve the same normalized VFR
+frame grid, a tail chunk can decode the source prefix again. Crossfades therefore
+add decoding and process overhead; they are not a faster export mode or a promise
+of real-time 4K/8K performance.
 
 ## Sequence export
 
@@ -235,7 +274,7 @@ Before rendering, Stitch checks available space for intermediates and a staged
 output, including a 512 MiB reserve. Estimates scale with resolution, frame rate,
 duration, and profile, with a 50% size margin. Constant-quality encoding has no
 fixed file size, so these are planning estimates, not disk-space guarantees.
-Space is checked again between clips and before assembly.
+Space is checked again between clips/chunks and before assembly.
 
 The output is staged in a private directory beside the destination. Only a
 successfully validated file is published. Source-file paths and aliases cannot be
@@ -382,6 +421,9 @@ These are correctness fixtures, not throughput benchmarks. Encoder-specific test
 skip when the local FFmpeg build lacks that encoder.
 Sequence tests decode both sides of joins across mixed-resolution/frame-rate clips,
 exercise all profiles, and check cancellation, output guards, and retained diagnostics.
+Crossfade tests inspect blended pixels and tone gains, middle clips without a body,
+fractional output rates, missing/muted audio, shortened overlays, original-only
+encoder inputs, and 4K/8K at 120 fps across all three export profiles.
 Proxy tests cover both cache qualities, delayed audio and nonzero source clocks,
 4K/8K HEVC input, source/cache invalidation, cancellation, and original-only export.
 Qt tests exercise background cancellation, source-time trim markers, real proxy
@@ -405,6 +447,8 @@ uv run pytest -m "not integration"
 
 ```sh
 uv run python scripts/endurance.py --seconds 7200
+# Exercise 23 one-second crossfades (7,177-second resulting sequence):
+uv run python scripts/endurance.py --seconds 7200 --crossfade 1
 ```
 
 This opt-in check creates a private temporary directory and keeps its artifacts.
@@ -423,6 +467,14 @@ and 7,200-second cases in 1.11 s and 110.59 s. Sampled Python RSS peaks were
 0.042 ms at 5, 300, 3,600, and 7,195 seconds, with video markers on the expected
 frames. Both final stream durations matched 7,200 seconds. Cancelling an observed
 active encoder returned in 0.095 s and preserved the existing destination.
+
+The same day's crossfade run (23 one-second overlaps) produced 7,177 seconds of
+video/audio in 121.87 s. The 60-second comparison took 1.12 s. Sampled Python RSS
+peaks were 39.77/75.58 MiB; child-process peaks were 21.23/63.47 MiB. Checked markers
+at 5, 304, 3,593, and 7,172 seconds had 0.042 ms audio error and zero video-frame
+error. Active-encoder cancellation returned in 0.094 s without replacing the
+destination. These are local low-resolution measurements, not high-resolution
+throughput or absolute memory bounds.
 
 ## Storage
 
@@ -455,6 +507,7 @@ Proxy logs and diagnostic/build artifacts are retained until removed manually.
 - `src/stitch/sources.py`: import services and cache freshness checks.
 - `src/stitch/render_plan.py`: pure segment command generation and encoder profiles.
 - `src/stitch/render.py`: isolated single-segment execution, diagnostics, and validation.
+- `src/stitch/joins.py`: original-only body/overlap plans and bounded crossfade rendering.
 - `src/stitch/process.py`: process supervision, bounded progress, and cancellation.
 - `src/stitch/export.py`: sequential assembly, disk estimates, and safe publication.
 - `src/stitch/audio.py`: bounded overlay preparation and whole-sequence mixing.

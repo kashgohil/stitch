@@ -100,6 +100,8 @@ def run_smoke(directory: Path) -> int:
             elif stage[0] == "audio" and not window._importing:
                 assert window.document.project.overlay is not None, window.error.toPlainText()
                 window.overlay_editor.gain.setValue(-9)
+                window.output_editor.join_mode.setCurrentIndex(1)
+                window.output_editor.crossfade_duration.setValue(0.2)
                 window.apply_edits()
                 assert window.save_to_path(project_file)
                 expected = window.document.project
