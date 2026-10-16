@@ -3,7 +3,8 @@
 import json
 import shutil
 import subprocess
-import sys
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
@@ -11,6 +12,7 @@ from uuid import UUID
 from stitch.media import MediaError, file_identity, probe_media
 from stitch.models import MediaMetadata, Project
 from stitch.paths import AppPaths
+from stitch.process import RenderCancelled, check_cancelled, progress_command, run_ffmpeg
 from stitch.render_plan import RenderError, RenderOptions, SegmentPlan, build_segment_plan
 
 
@@ -60,12 +62,15 @@ def render_segment(
     *,
     options: RenderOptions = RenderOptions(),
     timeout: float | None = None,
+    cancel: threading.Event | None = None,
+    progress: Callable[[float], None] | None = None,
 ) -> RenderResult:
     """Render one clip, never overwrite a source/final export. Not a GUI-thread API.
 
     The caller owns successful job cleanup. Failed jobs retain logs and any partial
     segment for diagnosis; only a returned RenderResult denotes validated success.
     """
+    check_cancelled(cancel)
     project = Project.model_validate(project.model_dump())
     clip = next((clip for clip in project.clips if clip.id == clip_id), None)
     if clip is None:
@@ -94,31 +99,23 @@ def render_segment(
             source, clip, project.output, job / "segment.mov", ffmpeg=executable, options=options
         )
         manifest.update(
-            command=list(plan.command),
+            command=list(progress_command(plan.command)),
             frame_count=plan.frame_count,
             duration=float(plan.duration),
             warnings=list(plan.warnings),
             state="running",
         )
         write_status()
-        with (job / "ffmpeg.log").open("wb") as log:
-            result = subprocess.run(
-                plan.command,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=log,
-                timeout=timeout,
-                check=False,
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-            )
-        manifest["returncode"] = result.returncode
-        if result.returncode:
-            raise RenderError(
-                f"FFmpeg exited with code {result.returncode}. See {job / 'ffmpeg.log'}"
-            )
+        returncode = run_ffmpeg(
+            plan.command, job / "ffmpeg.log", timeout=timeout, cancel=cancel, progress=progress
+        )
+        manifest["returncode"] = returncode
+        if returncode:
+            raise RenderError(f"FFmpeg exited with code {returncode}. See {job / 'ffmpeg.log'}")
         if file_identity(source.path) != source.cache.identity:
             raise RenderError("Source changed during rendering. The segment was not accepted.")
         metadata = probe_media(plan.destination)
+        check_cancelled(cancel)
         validate_segment(plan, metadata)
         manifest.update(
             state="succeeded",
@@ -133,9 +130,12 @@ def render_segment(
             if isinstance(exc, subprocess.TimeoutExpired)
             else str(exc)
         )
-        manifest.update(state="failed", error=error)
+        manifest.update(
+            state="cancelled" if isinstance(exc, RenderCancelled) else "failed", error=error
+        )
         try:
             write_status()
         except OSError:
             pass  # Preserve the original failure, including when the disk is full.
-        raise RenderError(f"{error}\nRender diagnostics: {job}") from exc
+        error_type = RenderCancelled if isinstance(exc, RenderCancelled) else RenderError
+        raise error_type(f"{error}\nRender diagnostics: {job}") from exc

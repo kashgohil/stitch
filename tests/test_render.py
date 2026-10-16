@@ -1,7 +1,6 @@
 import json
 import subprocess
 from dataclasses import replace
-from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +16,7 @@ from stitch.models import (
     VideoStream,
 )
 from stitch.paths import AppPaths
+from stitch.process import progress_command
 from stitch.render import render_segment, validate_segment
 from stitch.render_plan import RenderError, build_segment_plan
 
@@ -61,18 +61,18 @@ def test_runner_retains_command_and_validates_result(project, paths, monkeypatch
     calls = []
     monkeypatch.setattr("stitch.render.shutil.which", lambda name: "ffmpeg-test")
 
-    def run(command, **kwargs):
+    def run(command, log_path, **kwargs):
         calls.append((command, kwargs))
-        assert kwargs["stdin"] == subprocess.DEVNULL
         assert not kwargs.get("shell")
-        return SimpleNamespace(returncode=0)
+        log_path.touch()
+        return 0
 
-    monkeypatch.setattr("stitch.render.subprocess.run", run)
+    monkeypatch.setattr("stitch.render.run_ffmpeg", run)
     monkeypatch.setattr("stitch.render.probe_media", lambda path: project.sources[0].cache.metadata)
     result = render_segment(project, project.clips[0].id, paths, timeout=5)
     status = json.loads((result.job / "status.json").read_text())
     assert status["state"] == "succeeded" and status["frame_count"] == 30
-    assert status["command"] == list(calls[0][0])
+    assert status["command"] == list(progress_command(calls[0][0]))
     assert result.path.parent == result.job and result.job.parent == paths.jobs
     assert (result.job / "ffmpeg.log").exists()
 
@@ -81,15 +81,15 @@ def test_runner_retains_command_and_validates_result(project, paths, monkeypatch
 def test_failed_jobs_keep_diagnostics_without_touching_source(project, paths, monkeypatch, failure):
     monkeypatch.setattr("stitch.render.shutil.which", lambda name: "ffmpeg-test")
 
-    def run(command, **kwargs):
-        kwargs["stderr"].write(b"encoder diagnostic\n")
+    def run(command, log_path, **kwargs):
+        log_path.write_bytes(b"encoder diagnostic\n")
         if failure == "timeout":
             raise subprocess.TimeoutExpired(command, 5)
         if failure == "launch":
             raise OSError("cannot launch")
-        return SimpleNamespace(returncode=1 if failure == "exit" else 0)
+        return 1 if failure == "exit" else 0
 
-    monkeypatch.setattr("stitch.render.subprocess.run", run)
+    monkeypatch.setattr("stitch.render.run_ffmpeg", run)
     original_identity = project.sources[0].cache.identity
     identities = iter([original_identity, original_identity.model_copy(update={"size": 999})])
     if failure == "changed":
@@ -116,7 +116,7 @@ def test_stale_source_is_rejected_before_ffmpeg(project, paths, monkeypatch):
     def never(*args, **kwargs):
         pytest.fail("FFmpeg must not run with stale metadata")
 
-    monkeypatch.setattr("stitch.render.subprocess.run", never)
+    monkeypatch.setattr("stitch.render.run_ffmpeg", never)
     with pytest.raises(RenderError, match="stale"):
         render_segment(project, project.clips[0].id, paths)
 
