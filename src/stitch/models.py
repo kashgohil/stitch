@@ -1,5 +1,6 @@
 """Versioned edit decisions and cached media facts. No Qt or filesystem access."""
 
+import math
 from fractions import Fraction
 from pathlib import Path
 from typing import Annotated, Literal, Self
@@ -155,6 +156,18 @@ class OutputSettings(Model):
     frame_rate: str = "30000/1001"
     profile: Literal["hevc_main10", "h264", "prores_hq"] = "hevc_main10"
     allow_upscale: bool = False
+    join_mode: Literal["hard_cut", "crossfade"] = "hard_cut"
+    crossfade_duration: Seconds = 0.5
+
+    @property
+    def overlap_frames(self) -> int:
+        if self.join_mode == "hard_cut":
+            return 0
+        return math.ceil(Fraction(str(self.crossfade_duration)) * Fraction(self.frame_rate))
+
+    @property
+    def overlap_duration(self) -> Fraction:
+        return self.overlap_frames / Fraction(self.frame_rate)
 
     @field_validator("frame_rate")
     @classmethod
@@ -208,4 +221,20 @@ class Project(Model):
             cached = sources[self.overlay.source_id].cache
             if cached is not None and not cached.metadata.audio:
                 raise ValueError("overlay source must contain audio")
+        if len(self.clips) > 1 and self.output.overlap_frames:
+            for index, clip in enumerate(self.clips):
+                cached = sources[clip.source_id].cache
+                if not cached:
+                    continue  # Export requires current metadata before planning.
+                end = clip.out_point
+                if end is None:
+                    end = cached.metadata.video.duration or cached.metadata.duration
+                overlaps = int(index > 0) + int(index < len(self.clips) - 1)
+                required = float(self.output.overlap_duration) * overlaps
+                if required > end - clip.in_point + 0.000001:
+                    raise ValueError(
+                        f"Clip {index + 1} is too short for {overlaps} crossfade overlap(s): "
+                        f"needs {required:.6f}s after output-frame rounding. "
+                        "Reduce the crossfade duration or extend the trim."
+                    )
         return self

@@ -18,6 +18,7 @@ from stitch.audio import (
     overlay_duration,
     overlay_mix_graph,
 )
+from stitch.joins import plan_crossfades, render_join_chunk
 from stitch.media import MediaError, file_identity, probe_media
 from stitch.models import MediaMetadata, Project
 from stitch.paths import AppPaths
@@ -258,6 +259,7 @@ def export_project(
     warnings = []
     segments = []
     overlay_path = None
+    render_count = len(project.clips)
 
     def write_status() -> None:
         (job / "status.json").write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
@@ -268,7 +270,7 @@ def export_project(
                 ExportProgress(
                     stage,
                     clip,
-                    len(project.clips),
+                    render_count,
                     clip_fraction,
                     fraction,
                     time.monotonic() - started,
@@ -293,7 +295,7 @@ def export_project(
             if source.cache is None or file_identity(source.path) != source.cache.identity:
                 raise RenderError(f"Source is missing or changed; reimport {source.path.name}.")
             plan = build_segment_plan(
-                source, clip, project.output, job / f"{index}.mov", options=options
+                source, clip, project.output, job / f"{index}.mov", options=options, ffmpeg=ffmpeg
             )
             plans.append(plan)
             video = source.cache.metadata.video
@@ -304,6 +306,10 @@ def export_project(
                 "Mixed color metadata is not supported yet. "
                 "Normalize sources to one SDR color space."
             )
+        chunks = plan_crossfades(project, plans, job)
+        if chunks:
+            plans = [chunk.plan for chunk in chunks]
+        render_count = len(plans)
         duration = sum((plan.duration for plan in plans), Fraction(0))
         estimate = estimate_disk(project, float(duration))
         overlay_bytes = (
@@ -324,7 +330,7 @@ def export_project(
         )
         segment_paths = replace(paths, jobs=job / "segments")
         completed = Fraction(0)
-        for index, (clip, plan) in enumerate(zip(project.clips, plans, strict=True)):
+        for index, plan in enumerate(plans):
             check_cancelled(cancel)
             state["clip"] = index + 1
             write_status()
@@ -344,11 +350,21 @@ def export_project(
                     render_weight
                     * (float(completed) + part * float(plan.duration))
                     / float(duration),
-                    f"Rendering clip {index + 1}/{len(plans)}",
+                    f"Rendering {chunks[index].kind if chunks else 'clip'} "
+                    f"{index + 1}/{len(plans)}",
                 )
 
-            result = render_segment(
-                project, clip.id, segment_paths, options=options, cancel=cancel, progress=on_clip
+            result = (
+                render_join_chunk(chunks[index], segment_paths, cancel=cancel, progress=on_clip)
+                if chunks
+                else render_segment(
+                    project,
+                    project.clips[index].id,
+                    segment_paths,
+                    options=options,
+                    cancel=cancel,
+                    progress=on_clip,
+                )
             )
             segments.append(result.path)
             on_clip(float(plan.duration))
