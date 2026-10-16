@@ -4,7 +4,7 @@ A desktop video assembler for arranging, trimming, and cropping clips and adding
 audio to long-form video. The current build includes the desktop shell, media-tool
 checks, a clip queue with trim/crop and source-audio controls, output settings,
 atomic save/open, cached media probing, and full-sequence software export with
-progress and cancellation. Preview and overlay-audio mixing are upcoming issues.
+progress, cancellation, and one music/voice-over overlay. Preview is the next issue.
 
 ## Setup and launch
 
@@ -51,7 +51,8 @@ This prints the resolved tools and storage paths. Exit code 0 means setup passed
    Removing a clip never deletes its source file.
 3. Set in/out points in seconds, or leave **Use source end** checked. Enable
    **Crop this clip** to enter a rectangle in rotated source pixels. Uncheck
-   **Keep source audio** to mute that clip. Apply changes or select another clip
+   **Keep source audio** to mute that clip; adjust **Source gain** independently
+   for each clip. Apply changes or select another clip
    to validate the edits; invalid drafts stay visible for correction or reset.
 4. Choose output dimensions, an exact frame rate, and a profile. A new project
    matches its first successful import's dimensions and reported frame rate
@@ -69,10 +70,44 @@ This prints the resolved tools and storage paths. Exit code 0 means setup passed
 The Source column flags missing or changed files without removing their edits.
 Reimporting an existing source refreshes its metadata and adds another clip;
 incompatible refreshed metadata is rejected. Relinking is not implemented yet.
-There is no playback or overlay-audio mixing yet. Projects containing an overlay
-are explicitly rejected for now, rather than exporting without the requested audio.
-Tests cover short 4K/8K render fixtures, not sustained high-resolution playback
-or multi-hour high-resolution export performance.
+There is no playback yet. Tests cover short 4K/8K render fixtures, not sustained
+high-resolution playback or multi-hour high-resolution export performance.
+
+## Add music or voice-over
+
+Open the **Audio overlay** tab beside **Output**, then choose **Add audio…**.
+Inspection runs in the background, like video import. The first audio stream is
+used, including when the selected file also contains video. Only one overlay
+track is supported; it starts with its first decoded audio sample at sequence
+time zero, independently of container start timestamps.
+
+- **Overlay gain** controls its level separately from each clip's **Source gain**.
+  Both controls range from −60 to +12 dB; 0 dB retains the input level below the
+  limiter threshold. Source mute is per clip; **Include overlay** mutes/unmutes
+  the overlay without removing its saved settings.
+- **Stop when audio ends** leaves silence from the overlay after its end; source
+  audio continues. **Loop to sequence end** repeats the audio continuously across
+  clip boundaries. Both modes stop at the sequence end. Loops do not crossfade,
+  so a file whose ends do not match can click at the repeat point.
+- **Replace audio…** preserves gain, mute, and loop/stop settings. Failed or
+  cancelled replacement keeps the existing overlay. **Remove audio** removes
+  only the project reference, never the source file. Save/reopen retains all
+  clip gains and overlay settings.
+
+The exporter normalizes the overlay once into a bounded-duration, 48 kHz stereo
+24-bit PCM file on disk, then loops or pads it during final assembly. This avoids
+buffering an entire track in RAM and avoids looping unrelated video-container
+padding. The temporary audio file is included in disk estimates and removed
+after successful export; failed jobs retain it with `overlay.log` for diagnosis.
+Muted overlays are not read, so a missing muted overlay does not block export.
+
+Mixing uses the chosen gains without automatic volume normalization. A
+latency-compensated sample-peak limiter caps source gain and the final sum at
+0.95 full scale, with no automatic makeup gain. It can reduce loud passages;
+it is not loudness mastering or a true-peak guarantee after lossy AAC encoding.
+There are no fades, ducking, placement offsets, or additional overlay tracks yet.
+The [FFmpeg audio-filter documentation](https://ffmpeg.org/ffmpeg-filters.html#amix)
+describes the mixing and limiter behavior used here.
 
 ## Sequence export
 
@@ -93,7 +128,8 @@ Clips render sequentially into a job-specific cache directory. The final pass
 copies the encoded video and encodes stereo 48 kHz delivery audio once: AAC at
 320 kbit/s for MP4, or 24-bit PCM for the ProRes master. Fractional frame boundaries
 use cumulative timestamp rounding to avoid per-clip rounding drift. Whole-job
-progress allocates 90% to rendering and the remainder to assembly/validation;
+progress allocates 90% to rendering (85% plus 5% overlay preparation when enabled)
+and the remainder to assembly/validation;
 it measures work stages, not a reliable time-remaining estimate.
 
 Before rendering, Stitch checks available space for intermediates and a staged
@@ -147,7 +183,8 @@ The renderer supports:
 - Software `libx265` Main10 (`yuv420p10le`), `libx264` High (`yuv420p`), and
   `prores_ks` 422 HQ (`yuv422p10le`). Pixel format fallback is disabled and output
   metadata is checked. H.264 deliberately reduces higher-bit-depth input to 8-bit.
-- Source-audio gain and mute; stereo 48 kHz, 24-bit PCM for every intermediate,
+- Source-audio gain, peak limiting, and mute; stereo 48 kHz, 24-bit PCM for every
+  intermediate,
   including silence for clips without usable audio in the selected interval.
 
 All intermediate profiles use PCM, not AAC, to avoid repeated lossy audio encoding
@@ -284,7 +321,8 @@ FFmpeg is supplied locally, not bundled with this prototype.
 - `src/stitch/render.py`: isolated single-segment execution, diagnostics, and validation.
 - `src/stitch/process.py`: process supervision, bounded progress, and cancellation.
 - `src/stitch/export.py`: sequential assembly, disk estimates, and safe publication.
+- `src/stitch/audio.py`: bounded overlay preparation and whole-sequence mixing.
 - `tests/`: model, storage, source-cache, media integration, CLI, and Qt lifecycle checks.
 
 Plan: [DOC-62 — Stitch weekend plan](https://rezee.app/kash/docs/62).
-Next: [ISSUE-1147 — Overlay audio mixing](https://rezee.app/kash/plan/1147).
+Next: [ISSUE-1148 — Proxy preview](https://rezee.app/kash/plan/1148).
