@@ -1,7 +1,15 @@
 import pytest
 
 from stitch.media import MediaError
-from stitch.models import AudioStream, Clip, MediaMetadata, Project, Source, VideoStream
+from stitch.models import (
+    AudioSettings,
+    AudioStream,
+    Clip,
+    MediaMetadata,
+    Project,
+    Source,
+    VideoStream,
+)
 from stitch.project_io import ProjectError, load_project, save_project
 from stitch.sources import add_video, refresh_source, set_overlay, source_status
 
@@ -122,3 +130,33 @@ def test_overlay_accepts_audio_only_but_clip_import_rejects_it(media, monkeypatc
 
 def test_directory_is_unavailable_without_discarding_source(tmp_path):
     assert source_status(Source(path=tmp_path)).state == "unavailable"
+
+
+def test_overlay_replacement_keeps_settings_and_prunes_only_unused_previous_source(media, tmp_path):
+    from stitch.document import change_project, remove_overlay
+
+    path, _, _ = media
+    project = set_overlay(add_video(Project(), path), path)
+    shared_id = project.overlay.source_id
+    project = change_project(
+        project,
+        overlay=project.overlay.model_copy(
+            update={
+                "audio": AudioSettings(gain_db=-8.5),
+                "end_behavior": "loop",
+            }
+        ),
+    )
+    replacement = tmp_path / "music.wav"
+    replacement.write_bytes(b"replacement")
+    project = set_overlay(project, replacement)
+    assert project.overlay.audio.gain_db == -8.5 and project.overlay.end_behavior == "loop"
+    assert shared_id in {source.id for source in project.sources}
+    other = tmp_path / "other.wav"
+    other.write_bytes(b"other")
+    project = set_overlay(project, other)
+    assert {source.path for source in project.sources} == {path, other}
+    project = remove_overlay(project)
+    assert project.overlay is None and project.sources[0].id == shared_id
+    assert len(project.sources) == 1
+    assert path.exists() and replacement.exists() and other.exists()

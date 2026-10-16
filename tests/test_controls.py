@@ -355,3 +355,102 @@ def test_export_failure_restores_controls(window, qtbot, tmp_path, monkeypatch):
     assert window.export_status.text() == "Export failed."
     assert "Disk is full" in window.error.toPlainText()
     assert window.export.isEnabled() and window.save.isEnabled()
+
+
+def test_overlay_ui_gain_loop_save_reopen_replace_remove(window, qtbot, tmp_path):
+    import_clips(window, qtbot, tmp_path)
+    window.clip_editor.gain.setValue(-4.5)
+    music = tmp_path / "music.wav"
+    music.write_bytes(b"music")
+    window.import_overlay_path(music)
+    qtbot.waitUntil(lambda: not window._importing)
+    assert window.document.project.clips[0].audio.gain_db == -4.5
+    editor = window.overlay_editor
+    window.project_tabs.setCurrentWidget(editor)
+    assert "music.wav" in editor.metadata.text()
+    editor.gain.setValue(-8.5)
+    editor.behavior.setCurrentIndex(editor.behavior.findData("loop"))
+    assert editor.pending and "*" in window.windowTitle()
+    saved = tmp_path / "audio-project.json"
+    assert window.save_to_path(saved)
+    expected = window.document.project
+    window.new_project()
+    assert window.document.project.overlay is None
+    assert window.open_path(saved)
+    assert window.document.project == expected
+    assert editor.gain.value() == -8.5 and editor.behavior.currentData() == "loop"
+    replacement = tmp_path / "replacement.wav"
+    replacement.write_bytes(b"replacement")
+    window.import_overlay_path(replacement)
+    qtbot.waitUntil(lambda: not window._importing)
+    assert editor.gain.value() == -8.5 and len(window.document.project.sources) == 2
+    assert "replacement.wav" in editor.metadata.text()
+    editor.remove.click()
+    assert window.document.project.overlay is None
+    assert len(window.document.project.sources) == 1
+    assert music.exists() and replacement.exists()
+
+
+def test_failed_or_cancelled_audio_replacement_preserves_overlay(
+    window,
+    qtbot,
+    tmp_path,
+    monkeypatch,
+    metadata,
+):
+    music = tmp_path / "music.wav"
+    music.write_bytes(b"music")
+    window.import_overlay_path(music)
+    qtbot.waitUntil(lambda: not window._importing)
+    before = window.document.project
+    window.import_overlay_path(tmp_path / "missing.wav")
+    qtbot.waitUntil(lambda: not window._importing)
+    assert window.document.project == before
+    assert "missing" in window.error.toPlainText()
+    started, release = threading.Event(), threading.Event()
+
+    def slow_probe(path):
+        started.set()
+        release.wait(timeout=3)
+        return metadata
+
+    monkeypatch.setattr("stitch.sources.probe_media", slow_probe)
+    replacement = tmp_path / "replacement.wav"
+    replacement.write_bytes(b"replacement")
+    try:
+        window.import_overlay_path(replacement)
+        qtbot.waitUntil(started.is_set)
+        assert not window.overlay_editor.add.isEnabled()
+        window.stop_import()
+    finally:
+        release.set()
+        qtbot.waitUntil(lambda: not window._importing)
+    assert window.document.project == before
+
+
+def test_overlay_drafts_reset_and_unsaved_prompt(window, qtbot, tmp_path, monkeypatch):
+    path = tmp_path / "music.wav"
+    path.write_bytes(b"music")
+    window.import_overlay_path(path)
+    qtbot.waitUntil(lambda: not window._importing)
+    assert window.save_to_path(tmp_path / "project.json")
+    editor = window.overlay_editor
+    editor.enabled.setChecked(False)
+    assert editor.pending and not editor.gain.isEnabled()
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Cancel)
+    window.new_project()
+    assert window.document.project.overlay is not None and editor.pending
+    editor.reset.click()
+    assert editor.enabled.isChecked() and not editor.pending
+    assert "*" not in window.windowTitle()
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Discard)
+
+
+def test_audio_first_import_does_not_override_first_video_output(window, qtbot, tmp_path):
+    path = tmp_path / "music.wav"
+    path.write_bytes(b"music")
+    window.import_overlay_path(path)
+    qtbot.waitUntil(lambda: not window._importing)
+    assert not window.document.output_configured
+    import_clips(window, qtbot, tmp_path)
+    assert window.document.project.output.width == 7680

@@ -23,13 +23,21 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from stitch.dependencies import ToolStatus, installation_help, probe_tools
-from stitch.document import Document, change_project, move_clip, remove_clip, replace_clip
-from stitch.editors import ClipEditor, OutputEditor
+from stitch.document import (
+    Document,
+    change_project,
+    move_clip,
+    remove_clip,
+    remove_overlay,
+    replace_clip,
+)
+from stitch.editors import ClipEditor, OutputEditor, OverlayEditor
 from stitch.paths import AppPaths
 from stitch.project_io import ProjectError
 from stitch.sources import source_status
@@ -155,7 +163,16 @@ class MainWindow(QMainWindow):
         self.output_editor.apply_requested.connect(self.apply_edits)
         self.output_editor.reset_requested.connect(self._reset_output)
         self.output_editor.changed.connect(self._update_title)
-        layout.addWidget(self.output_editor)
+        self.overlay_editor = OverlayEditor()
+        self.overlay_editor.changed.connect(self._update_title)
+        self.overlay_editor.apply_requested.connect(self.apply_edits)
+        self.overlay_editor.reset_requested.connect(self._reset_overlay)
+        self.overlay_editor.import_requested.connect(self.choose_overlay)
+        self.overlay_editor.remove_requested.connect(self.remove_overlay)
+        self.project_tabs = QTabWidget()
+        self.project_tabs.addTab(self.output_editor, "Output")
+        self.project_tabs.addTab(self.overlay_editor, "Audio overlay")
+        layout.addWidget(self.project_tabs)
         self.export_panel = QGroupBox("Export")
         export_layout = QVBoxLayout(self.export_panel)
         self.export_status = QLabel()
@@ -215,10 +232,14 @@ class MainWindow(QMainWindow):
 
     def _show_error(self, message: str) -> None:
         self.error.setPlainText(message)
+        lines = max(1, len(message.splitlines()))
+        self.error.setFixedHeight(
+            min(80, max(36, self.error.fontMetrics().lineSpacing() * (lines + 1) + 12))
+        )
         self.error.setVisible(bool(message))
 
     def _update_title(self) -> None:
-        dirty = self.document.dirty or self.clip_editor.pending or self.output_editor.pending
+        dirty = self.document.dirty or self.has_pending_edits
         self.setWindowTitle(f"{self.document.project.name}{' *' if dirty else ''} — Stitch")
 
     def _update_controls(self) -> None:
@@ -231,11 +252,13 @@ class MainWindow(QMainWindow):
             self.sequence,
             self.clip_editor,
             self.output_editor,
+            self.overlay_editor,
         ):
             widget.setEnabled(idle)
         for action in self.file_actions:
             action.setEnabled(idle)
         self.add.setEnabled(idle and self.tools_ready)
+        self.overlay_editor.add.setEnabled(idle and self.tools_ready)
         self.export.setEnabled(idle and self.tools_ready and bool(self.document.project.clips))
         self.retry.setEnabled(idle and self._worker is not None and not self._worker.isRunning())
         self.cancel_import.setVisible(self._importing)
@@ -296,6 +319,7 @@ class MainWindow(QMainWindow):
         self._refreshing = False
         self._load_selected()
         self.output_editor.load(project)
+        self.overlay_editor.load(project)
         self._update_controls()
         self._update_title()
 
@@ -310,6 +334,14 @@ class MainWindow(QMainWindow):
         self.output_editor.load(self.document.project)
         self._update_title()
 
+    def _reset_overlay(self) -> None:
+        self.overlay_editor.load(self.document.project)
+        self._update_title()
+
+    @property
+    def has_pending_edits(self) -> bool:
+        return self.clip_editor.pending or self.output_editor.pending or self.overlay_editor.pending
+
     def _apply_pending(self) -> bool:
         project = self.document.project
         try:
@@ -318,13 +350,15 @@ class MainWindow(QMainWindow):
             if self.output_editor.pending:
                 name, output = self.output_editor.value()
                 project = change_project(project, name=name, output=output)
+            if self.overlay_editor.pending:
+                project = change_project(project, overlay=self.overlay_editor.value())
         except (ValidationError, ProjectError) as exc:
             self._show_error(readable_error(exc))
             return False
         if project.output != self.document.project.output:
             self.document.output_configured = True
         self.document.project = project
-        self.clip_editor.pending = self.output_editor.pending = False
+        self.clip_editor.pending = self.output_editor.pending = self.overlay_editor.pending = False
         self._show_error("")
         self._update_title()
         return True
@@ -369,7 +403,7 @@ class MainWindow(QMainWindow):
         paths, _ = QFileDialog.getOpenFileNames(self, "Add videos", "", "All files (*)")
         self.import_paths([Path(path) for path in paths])
 
-    def import_paths(self, paths: list[Path]) -> None:
+    def import_paths(self, paths: list[Path], *, is_overlay: bool = False) -> None:
         if self.busy or not self.tools_ready or not paths or not self._apply_pending():
             return
         if self._import_worker:
@@ -382,6 +416,7 @@ class MainWindow(QMainWindow):
             paths,
             not self.document.project.clips and not self.document.output_configured,
             self,
+            is_overlay=is_overlay,
         )
         self._import_worker.progress.connect(self._import_progress)
         self._import_worker.finished.connect(self._import_finished)
@@ -405,19 +440,26 @@ class MainWindow(QMainWindow):
         worker = self._import_worker
         self._importing = False
         self.document.project = worker.project
-        if worker.imported:
+        if worker.imported and not worker.is_overlay:
             self.document.output_configured = True
-        self._refresh(worker.project.clips[-1].id if worker.project.clips else None)
+        selected = (
+            self._selected
+            if worker.is_overlay
+            else (worker.project.clips[-1].id if worker.project.clips else None)
+        )
+        self._refresh(selected)
         self._show_error("\n".join(worker.errors))
         self.statusBar().showMessage(
-            f"Imported {worker.imported} clips. {len(worker.errors)} failed."
+            ("Overlay audio imported." if worker.imported else "Overlay audio was not changed.")
+            if worker.is_overlay
+            else f"Imported {worker.imported} clips. {len(worker.errors)} failed."
         )
         if self._close_after_import:
             self._close_after_import = False
             self.close()
 
     def _confirm_replace(self) -> bool:
-        if not (self.document.dirty or self.clip_editor.pending or self.output_editor.pending):
+        if not (self.document.dirty or self.has_pending_edits):
             return True
         choice = QMessageBox.question(
             self,
@@ -557,6 +599,29 @@ class MainWindow(QMainWindow):
     @property
     def busy(self) -> bool:
         return self._importing or self._exporting
+
+    @Slot()
+    def choose_overlay(self) -> None:
+        if self.busy:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Add music or voice-over", "", "All files (*)")
+        if path:
+            self.import_overlay_path(Path(path))
+
+    def import_overlay_path(self, path: Path) -> None:
+        self.import_paths([path], is_overlay=True)
+
+    @Slot()
+    def remove_overlay(self) -> None:
+        if self.busy or not self.document.project.overlay:
+            return
+        pending = self.overlay_editor.pending
+        self.overlay_editor.pending = False
+        if not self._apply_pending():
+            self.overlay_editor.pending = pending
+            return
+        self.document.project = remove_overlay(self.document.project)
+        self._refresh(self._selected)
 
     @Slot()
     def choose_export(self) -> None:

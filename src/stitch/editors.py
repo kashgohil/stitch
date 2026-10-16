@@ -1,6 +1,6 @@
 """Small draft editors; changes become project data only after validation."""
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -16,7 +16,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from stitch.models import AudioSettings, Clip, Crop, OutputSettings, Project, Source
+from stitch.models import AudioSettings, Clip, Crop, OutputSettings, Overlay, Project, Source
+from stitch.sources import source_status
+
+
+def gain_box() -> QDoubleSpinBox:
+    widget = QDoubleSpinBox()
+    widget.setRange(-60, 12)
+    widget.setDecimals(1)
+    widget.setSuffix(" dB")
+    widget.setToolTip("0 dB keeps the original level. Positive gain can trigger peak limiting.")
+    return widget
 
 
 def integer_box(minimum: int, maximum: int = 131072) -> QSpinBox:
@@ -56,6 +66,7 @@ class ClipEditor(QGroupBox):
         self.source_end = QCheckBox("Use source end")
         self.crop_enabled = QCheckBox("Crop this clip")
         self.keep_audio = QCheckBox("Keep source audio")
+        self.gain = gain_box()
         form.addRow("In-point", self.start)
         form.addRow("Out-point", self.end)
         form.addRow(self.source_end)
@@ -74,6 +85,7 @@ class ClipEditor(QGroupBox):
             crop_form.addRow(title, widget)
         form.addRow(self.crop_controls)
         form.addRow(self.keep_audio)
+        form.addRow("Source gain", self.gain)
         layout.addWidget(self.controls)
         buttons = QHBoxLayout()
         self.apply = QPushButton("Apply clip changes")
@@ -84,12 +96,14 @@ class ClipEditor(QGroupBox):
         buttons.addWidget(self.reset)
         layout.addLayout(buttons)
         layout.addStretch()
-        for widget in (self.start, self.end, self.x, self.y, self.width, self.height):
+        for widget in (self.start, self.end, self.x, self.y, self.width, self.height, self.gain):
             widget.valueChanged.connect(self._changed)
         for widget in (self.source_end, self.crop_enabled, self.keep_audio):
             widget.toggled.connect(self._changed)
         self.source_end.toggled.connect(lambda checked: self.end.setEnabled(not checked))
         self.crop_enabled.toggled.connect(self.crop_controls.setEnabled)
+        self.crop_enabled.toggled.connect(self.crop_controls.setVisible)
+        self.keep_audio.toggled.connect(self.gain.setEnabled)
         self.load(None, None)
 
     def _changed(self, *args) -> None:
@@ -124,6 +138,7 @@ class ClipEditor(QGroupBox):
             self.end.setEnabled(clip.out_point is not None)
             self.crop_enabled.setChecked(clip.crop is not None)
             self.crop_controls.setEnabled(clip.crop is not None)
+            self.crop_controls.setVisible(clip.crop is not None)
             crop = clip.crop or Crop(width=width, height=height)
             for widget, value in (
                 (self.x, crop.x),
@@ -133,6 +148,8 @@ class ClipEditor(QGroupBox):
             ):
                 widget.setValue(value)
             self.keep_audio.setChecked(clip.audio.enabled)
+            self.gain.setValue(clip.audio.gain_db)
+            self.gain.setEnabled(clip.audio.enabled)
         else:
             self.metadata.setText(
                 "No cached video metadata. Reimport this source to inspect it."
@@ -159,9 +176,7 @@ class ClipEditor(QGroupBox):
             in_point=self.start.value(),
             out_point=None if self.source_end.isChecked() else self.end.value(),
             crop=crop,
-            audio=AudioSettings(
-                enabled=self.keep_audio.isChecked(), gain_db=self.clip.audio.gain_db
-            ),
+            audio=AudioSettings(enabled=self.keep_audio.isChecked(), gain_db=self.gain.value()),
         )
 
 
@@ -251,4 +266,111 @@ class OutputEditor(QGroupBox):
             frame_rate=self.fps.currentText().strip(),
             profile=self.profile.currentData(),
             allow_upscale=self.upscale.isChecked(),
+        )
+
+
+class OverlayEditor(QGroupBox):
+    changed = Signal()
+    apply_requested = Signal()
+    reset_requested = Signal()
+    import_requested = Signal()
+    remove_requested = Signal()
+
+    def __init__(self) -> None:
+        super().__init__("One music or voice-over track")
+        self.loading = False
+        self.pending = False
+        self.overlay: Overlay | None = None
+        layout = QVBoxLayout(self)
+        row = QHBoxLayout()
+        self.metadata = QLabel("No overlay audio. Add a file to start it at sequence time zero.")
+        self.metadata.setWordWrap(True)
+        self.metadata.setTextFormat(Qt.TextFormat.PlainText)
+        row.addWidget(self.metadata, 1)
+        self.add = QPushButton("Add audio…")
+        self.remove = QPushButton("Remove audio")
+        self.add.clicked.connect(self.import_requested)
+        self.remove.clicked.connect(self.remove_requested)
+        row.addWidget(self.add)
+        row.addWidget(self.remove)
+        layout.addLayout(row)
+        controls = QHBoxLayout()
+        self.enabled = QCheckBox("Include overlay")
+        self.gain = gain_box()
+        self.behavior = QComboBox()
+        self.behavior.addItem("Stop when audio ends", "stop")
+        self.behavior.addItem("Loop to sequence end", "loop")
+        self.apply = QPushButton("Apply audio")
+        self.reset = QPushButton("Reset audio edits")
+        self.apply.clicked.connect(self.apply_requested)
+        self.reset.clicked.connect(self.reset_requested)
+        for widget in (
+            self.enabled,
+            QLabel("Overlay gain"),
+            self.gain,
+            self.behavior,
+            self.apply,
+            self.reset,
+        ):
+            controls.addWidget(widget)
+        layout.addLayout(controls)
+        note = QLabel(
+            "Starts at 0:00 · Source gain is per clip · "
+            "Peak limiting is enabled; no loudness mastering."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.enabled.toggled.connect(self._changed)
+        self.gain.valueChanged.connect(self._changed)
+        self.behavior.currentIndexChanged.connect(self._changed)
+        self.enabled.toggled.connect(self._enabled_changed)
+
+    def _enabled_changed(self, enabled: bool) -> None:
+        self.gain.setEnabled(enabled and self.overlay is not None)
+        self.behavior.setEnabled(enabled and self.overlay is not None)
+
+    def _changed(self, *args) -> None:
+        if not self.loading:
+            self.pending = True
+            self.changed.emit()
+
+    def load(self, project: Project) -> None:
+        self.loading = True
+        self.overlay = project.overlay
+        present = self.overlay is not None
+        for widget in (self.enabled, self.remove, self.apply, self.reset):
+            widget.setEnabled(present)
+        self.add.setText("Replace audio…" if present else "Add audio…")
+        self.enabled.setChecked(present and self.overlay.audio.enabled)
+        self.gain.setValue(self.overlay.audio.gain_db if present else 0)
+        self.behavior.setCurrentIndex(
+            self.behavior.findData(self.overlay.end_behavior if present else "stop")
+        )
+        self._enabled_changed(self.enabled.isChecked())
+        if present:
+            source = next(s for s in project.sources if s.id == self.overlay.source_id)
+            state = source_status(source).state
+            audio = (
+                source.cache.metadata.audio[0]
+                if source.cache and source.cache.metadata.audio
+                else None
+            )
+            details = (
+                f"{audio.codec} · {audio.sample_rate or '?'} Hz · {audio.channels or '?'} channels"
+                if audio
+                else "Metadata unavailable"
+            )
+            self.metadata.setText(f"{source.path.name} · {state}\n{details}")
+            self.metadata.setToolTip(str(source.path))
+        else:
+            self.metadata.setText("No overlay audio. Add a file to start it at sequence time zero.")
+            self.metadata.setToolTip("")
+        self.pending = False
+        self.loading = False
+
+    def value(self) -> Overlay:
+        return Overlay(
+            source_id=self.overlay.source_id,
+            audio=AudioSettings(enabled=self.enabled.isChecked(), gain_db=self.gain.value()),
+            end_behavior=self.behavior.currentData(),
         )

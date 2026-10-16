@@ -87,12 +87,21 @@ def set_overlay(project: Project, path: Path) -> Project:
     source = _import_source(project, path)
     if not source.cache.metadata.audio:
         raise MediaError(f"{path.name} contains no audio stream.")
+    sources = _updated_sources(project, source)
+    previous = project.overlay
+    if previous and previous.source_id != source.id:
+        used_clips = {clip.source_id for clip in project.clips}
+        sources = tuple(s for s in sources if s.id != previous.source_id or s.id in used_clips)
     try:
         return Project(
             name=project.name,
-            sources=_updated_sources(project, source),
+            sources=sources,
             clips=project.clips,
-            overlay=Overlay(source_id=source.id),
+            overlay=Overlay(
+                source_id=source.id, audio=previous.audio, end_behavior=previous.end_behavior
+            )
+            if previous
+            else Overlay(source_id=source.id),
             output=project.output,
         )
     except ValidationError as exc:

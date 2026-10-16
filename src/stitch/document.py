@@ -44,6 +44,21 @@ def remove_clip(project: Project, clip_id: UUID) -> Project:
     )
 
 
+def remove_overlay(project: Project) -> Project:
+    if project.overlay is None:
+        return project
+    used_clips = {clip.source_id for clip in project.clips}
+    return change_project(
+        project,
+        overlay=None,
+        sources=tuple(
+            source
+            for source in project.sources
+            if source.id != project.overlay.source_id or source.id in used_clips
+        ),
+    )
+
+
 def match_first_clip(project: Project) -> Project:
     """Set a new project's output from its first import, preserving fractional FPS."""
     if not project.clips:

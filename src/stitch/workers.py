@@ -11,7 +11,7 @@ from stitch.export import export_project
 from stitch.models import Project
 from stitch.paths import AppPaths
 from stitch.process import RenderCancelled
-from stitch.sources import add_video
+from stitch.sources import add_video, set_overlay
 
 logger = logging.getLogger(__name__)
 
@@ -19,13 +19,22 @@ logger = logging.getLogger(__name__)
 class ImportWorker(QThread):
     progress = Signal(int, int, str)
 
-    def __init__(self, project: Project, paths: list[Path], match_output: bool, parent=None):
+    def __init__(
+        self,
+        project: Project,
+        paths: list[Path],
+        match_output: bool,
+        parent=None,
+        *,
+        is_overlay: bool = False,
+    ):
         super().__init__(parent)
         self.project = project
         self.paths = paths
         self.match_output = match_output
         self.errors: list[str] = []
         self.imported = 0
+        self.is_overlay = is_overlay
 
     def run(self) -> None:
         for index, path in enumerate(self.paths):
@@ -33,8 +42,14 @@ class ImportWorker(QThread):
                 break
             self.progress.emit(index + 1, len(self.paths), path.name)
             try:
-                updated = add_video(self.project, path)
-                if self.match_output and self.imported == 0:
+                updated = (
+                    set_overlay(self.project, path)
+                    if self.is_overlay
+                    else add_video(self.project, path)
+                )
+                if self.is_overlay and self.isInterruptionRequested():
+                    break  # Cancelling replacement leaves the existing overlay intact.
+                if self.match_output and self.imported == 0 and not self.is_overlay:
                     updated = match_first_clip(updated)
                 self.project = updated
                 self.imported += 1
