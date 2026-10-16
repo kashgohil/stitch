@@ -226,6 +226,19 @@ class OutputEditor(QGroupBox):
         format_form.addRow("Frame rate", self.fps)
         format_form.addRow("Profile", self.profile)
         layout.addLayout(format_form)
+        joins = QFormLayout()
+        self.join_mode = QComboBox()
+        self.join_mode.addItem("Hard cut", "hard_cut")
+        self.join_mode.addItem("Crossfade", "crossfade")
+        self.crossfade_duration = seconds_box()
+        self.crossfade_duration.setToolTip(
+            "Overlap at every join, rounded up to an output frame. "
+            "Shortens the sequence; middle clips need two overlaps. "
+            "Zero keeps hard cuts. Transitions appear in exports, not the selected-clip preview."
+        )
+        joins.addRow("Join", self.join_mode)
+        joins.addRow("Overlap", self.crossfade_duration)
+        layout.addLayout(joins)
         actions = QVBoxLayout()
         self.upscale = QCheckBox("Allow upscaling")
         self.apply = QPushButton("Apply output")
@@ -242,6 +255,12 @@ class OutputEditor(QGroupBox):
         self.fps.currentTextChanged.connect(self._changed)
         self.profile.currentIndexChanged.connect(self._changed)
         self.upscale.toggled.connect(self._changed)
+        self.join_mode.currentIndexChanged.connect(self._join_changed)
+        self.crossfade_duration.valueChanged.connect(self._changed)
+
+    def _join_changed(self, *args) -> None:
+        self.crossfade_duration.setEnabled(self.join_mode.currentData() == "crossfade")
+        self._changed()
 
     def _changed(self, *args) -> None:
         if not self.loading:
@@ -256,6 +275,9 @@ class OutputEditor(QGroupBox):
         self.fps.setCurrentText(project.output.frame_rate)
         self.profile.setCurrentIndex(self.profile.findData(project.output.profile))
         self.upscale.setChecked(project.output.allow_upscale)
+        self.join_mode.setCurrentIndex(self.join_mode.findData(project.output.join_mode))
+        self.crossfade_duration.setValue(project.output.crossfade_duration)
+        self._join_changed()
         self.pending = False
         self.loading = False
 
@@ -266,6 +288,8 @@ class OutputEditor(QGroupBox):
             frame_rate=self.fps.currentText().strip(),
             profile=self.profile.currentData(),
             allow_upscale=self.upscale.isChecked(),
+            join_mode=self.join_mode.currentData(),
+            crossfade_duration=self.crossfade_duration.value(),
         )
 
 

@@ -35,7 +35,6 @@ from stitch.document import (
     move_clip,
     remove_clip,
     remove_overlay,
-    replace_clip,
 )
 from stitch.editors import ClipEditor, OutputEditor, OverlayEditor
 from stitch.paths import AppPaths
@@ -331,9 +330,14 @@ class MainWindow(QMainWindow):
         if project.clips:
             self.table.setCurrentCell(selected_row, 0)
         self.empty.setVisible(not project.clips)
+        overlap = float(project.output.overlap_duration)
+        total = max(0, total - max(0, len(project.clips) - 1) * overlap)
+        join_summary = (
+            f" · Crossfade {overlap:.6f} s per join" if overlap and len(project.clips) > 1 else ""
+        )
         self.summary.setText(
             f"{len(project.clips)} clips · {'At least ' if unknown else ''}"
-            f"{total / 60:.2f} min · Selected-clip proxy preview"
+            f"{total / 60:.2f} min{join_summary} · Selected-clip proxy preview"
         )
         self._refreshing = False
         self._load_selected()
@@ -380,13 +384,21 @@ class MainWindow(QMainWindow):
     def _apply_pending(self) -> bool:
         project = self.document.project
         try:
+            changes = {}
             if self.clip_editor.pending:
-                project = replace_clip(project, self.clip_editor.value())
+                replacement = self.clip_editor.value()
+                if not any(clip.id == replacement.id for clip in project.clips):
+                    raise ProjectError("The selected clip is no longer in this project.")
+                changes["clips"] = tuple(
+                    replacement if clip.id == replacement.id else clip for clip in project.clips
+                )
             if self.output_editor.pending:
                 name, output = self.output_editor.value()
-                project = change_project(project, name=name, output=output)
+                changes.update(name=name, output=output)
             if self.overlay_editor.pending:
-                project = change_project(project, overlay=self.overlay_editor.value())
+                changes["overlay"] = self.overlay_editor.value()
+            if changes:
+                project = change_project(project, **changes)
         except (ValidationError, ProjectError) as exc:
             self._show_error(readable_error(exc))
             return False
@@ -418,7 +430,11 @@ class MainWindow(QMainWindow):
 
     def move_selected(self, offset: int) -> None:
         if not self.busy and self._selected and self._apply_pending():
-            self.document.project = move_clip(self.document.project, self._selected, offset)
+            try:
+                self.document.project = move_clip(self.document.project, self._selected, offset)
+            except (ValidationError, ProjectError) as exc:
+                self._show_error(readable_error(exc))
+                return
             self._refresh(self._selected)
 
     @Slot()
@@ -430,7 +446,12 @@ class MainWindow(QMainWindow):
         if not self._apply_pending():
             self.clip_editor.pending = pending
             return
-        self.document.project = remove_clip(self.document.project, self._selected)
+        try:
+            self.document.project = remove_clip(self.document.project, self._selected)
+        except (ValidationError, ProjectError) as exc:
+            self.clip_editor.pending = pending
+            self._show_error(readable_error(exc))
+            return
         self._refresh()
 
     @Slot()

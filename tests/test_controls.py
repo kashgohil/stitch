@@ -180,6 +180,47 @@ def test_manual_output_not_replaced_by_import(window, qtbot, tmp_path):
     assert window.document.project.output.frame_rate == "24/1"
 
 
+def test_crossfade_controls_validation_and_round_trip(window, qtbot, tmp_path):
+    import_clips(window, qtbot, tmp_path, 3)
+    editor = window.output_editor
+    assert not editor.crossfade_duration.isEnabled()
+    editor.join_mode.setCurrentIndex(1)
+    assert editor.crossfade_duration.isEnabled()
+    editor.crossfade_duration.setValue(11)
+    before = window.document.project
+    editor.apply.click()
+    assert window.document.project == before
+    assert "Clip 2" in window.error.toPlainText()
+    editor.crossfade_duration.setValue(0.25)
+    editor.apply.click()
+    saved = tmp_path / "crossfade.json"
+    assert window.save_to_path(saved)
+    window.new_project()
+    assert window.open_path(saved)
+    assert editor.join_mode.currentData() == "crossfade"
+    assert editor.crossfade_duration.value() == 0.25
+
+
+def test_crossfade_invalid_reorder_is_safe_and_combined_drafts_are_atomic(window, qtbot, tmp_path):
+    import_clips(window, qtbot, tmp_path, 3)
+    window.output_editor.fps.setCurrentText("30/1")
+    window.output_editor.join_mode.setCurrentIndex(1)
+    window.output_editor.crossfade_duration.setValue(1)
+    window.clip_editor.source_end.setChecked(False)
+    window.clip_editor.end.setValue(1)  # End clip needs one overlap; middle needs two.
+    window.apply_edits()
+    before = window.document.project
+    window.up.click()
+    assert window.document.project == before
+    assert "Clip 2" in window.error.toPlainText()
+    # Apply both drafts at once: shortening is valid when disabling transitions.
+    window.clip_editor.end.setValue(0.5)
+    window.output_editor.join_mode.setCurrentIndex(0)
+    window.apply_edits()
+    assert window.document.project.clips[-1].out_point == 0.5
+    assert window.document.project.output.join_mode == "hard_cut"
+
+
 def test_project_name_alone_does_not_disable_native_output_matching(window, qtbot, tmp_path):
     window.output_editor.name.setText("My footage")
     import_clips(window, qtbot, tmp_path)

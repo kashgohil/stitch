@@ -74,6 +74,8 @@ def match_first_clip(project: Project) -> Project:
         frame_rate=video.average_frame_rate or video.real_frame_rate or project.output.frame_rate,
         profile=project.output.profile,
         allow_upscale=project.output.allow_upscale,
+        join_mode=project.output.join_mode,
+        crossfade_duration=project.output.crossfade_duration,
     )
     return change_project(project, output=output)
 
