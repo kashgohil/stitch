@@ -36,6 +36,9 @@ def save_project(project: Project, path: Path) -> None:
     """Keep the previous project intact if serialization or writing fails."""
     temporary: Path | None = None
     try:
+        destination = path.resolve()
+        if any(source.path.resolve() == destination for source in project.sources):
+            raise ProjectError("Choose a project filename different from your source media.")
         # Revalidate even if a caller bypassed validation using model_copy/model_construct.
         validated = Project.model_validate(project.model_dump(mode="json"))
         payload = (validated.model_dump_json(indent=2) + "\n").encode("utf-8")
