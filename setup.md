@@ -296,6 +296,13 @@ The fixtures use 160×90 video at 12 fps, not 4K/8K footage.
 
 ## 7. Use command-line diagnostics
 
+Folder import and refresh use up to four concurrent metadata inspections.
+Each ffprobe process uses one decoder thread; export settings are unchanged.
+Results stay in natural filename order, and unchanged imported files reuse cached metadata.
+Cancellation stops new scheduling and waits for active probes to finish.
+The worker limit is `PROBE_WORKERS` in `src/stitch/folders.py`.
+Run the concurrency regression tests with `uv run pytest tests/test_folders.py`.
+
 Replace every example path before execution:
 
 ```sh

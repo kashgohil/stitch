@@ -384,3 +384,19 @@ def test_single_worker_mode_preserves_results(folder):
     result = scan_folder(Project(), folder, probe_workers=1)
     assert result.imported == 10 and not result.errors
     assert names(result.project) == [f"clip{i}.MP4" for i in range(1, 11)]
+
+
+def test_232_clip_folder_imports_once_and_refresh_reuses_metadata(folder, monkeypatch):
+    for index in range(11, 233):
+        (folder / f"clip{index}.MP4").write_bytes(f"original {index}".encode())
+    first = scan_folder(Project(), folder)
+    assert first.imported == 232 and not first.errors
+    assert names(first.project) == [f"clip{i}.MP4" for i in range(1, 233)]
+
+    def unexpected_probe(_):
+        pytest.fail("Unchanged folder refresh must not probe media again")
+
+    monkeypatch.setattr("stitch.sources.probe_media", unexpected_probe)
+    refreshed = scan_folder(first.project, folder)
+    assert refreshed.imported == 0 and refreshed.skipped == 232
+    assert not refreshed.errors and refreshed.project == first.project

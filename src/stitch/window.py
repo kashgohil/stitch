@@ -544,8 +544,10 @@ class MainWindow(QMainWindow):
         if self._importing:
             self._import_worker.requestInterruption()
             self.cancel_import.setEnabled(False)
-            self.cancel_import.setText("Finishing current file…")
-            self.statusBar().showMessage("Stopping after current inspection (up to 30 seconds).")
+            self.cancel_import.setText("Finishing active inspections…")
+            self.statusBar().showMessage(
+                "Stopping after active inspections finish (up to 30 seconds)."
+            )
 
     @Slot()
     def _import_finished(self) -> None:

@@ -168,10 +168,18 @@ whose marker was stripped by another program, cannot be identified automatically
 keep those outside the source folder or remove them from the reviewed queue.
 **Add videos…** can explicitly import marked media when that is intentional.
 
-**Stop import** stops directory discovery or finishes the current metadata probe
-(up to 30 seconds), then retains only completed imports. Refresh resumes without
-duplicating those imports. Scan/probe work stays off the UI thread; sorting stores
-filenames, not decoded media. Import/refresh never changes or deletes source files.
+Folder import and refresh inspect up to **four files concurrently**, with one
+decoder thread per ffprobe process. Results enter the queue in natural filename
+order even when probes finish out of order. Pending inspections are also bounded
+to four; known, unchanged files reuse their saved metadata. Individual-file import
+remains sequential. This changes inspection only, not export quality or encoding.
+
+**Stop import** stops directory discovery or new probe scheduling and waits for
+active probes to finish (up to their 30-second timeout). Already imported clips
+and the current ordered result are retained; other prefetched results are not
+added. Refresh retries remaining files without duplicating retained imports.
+Scan/probe work stays off the UI thread; sorting stores filenames, not decoded
+media. Import/refresh never changes or deletes source files.
 Crossfade validation applies to new clips too: a clip that cannot accommodate the
 overlaps is reported and not added to the queue/history.
 
