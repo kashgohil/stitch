@@ -115,7 +115,16 @@ def build_segment_plan(
     )
     fps = Fraction(output.frame_rate)
     requested_duration = Fraction(str(end)) - Fraction(str(clip.in_point))
-    frame_count = math.ceil(requested_duration * fps)
+    frames = requested_duration * fps
+    # ffprobe duration strings are rounded to microseconds. A full-source end
+    # such as 0.066667 must not turn two 30-fps frames into three. Explicit trim
+    # decisions retain their round-up semantics; only the inferred end is snapped.
+    nearest_frame = round(frames)
+    frame_count = (
+        max(1, nearest_frame)
+        if clip.out_point is None and abs(frames - nearest_frame) <= fps / 1_000_000
+        else math.ceil(frames)
+    )
     duration = frame_count / fps
     audio_samples = round(duration * 48000)
     origin = Fraction(str(video.start_time or 0)) + Fraction(str(clip.in_point))

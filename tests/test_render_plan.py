@@ -46,6 +46,31 @@ def source(tmp_path):
     )
 
 
+@pytest.mark.parametrize("rate,duration", [(30, 0.066667), (120, 0.016667), (24, 0.083333)])
+def test_inferred_source_end_tolerates_probe_precision_but_explicit_edits_round_up(
+    source,
+    tmp_path,
+    rate,
+    duration,
+):
+    video = source.cache.metadata.video.model_copy(update={"duration": duration})
+    metadata = source.cache.metadata.model_copy(update={"video": video})
+    source = source.model_copy(
+        update={"cache": source.cache.model_copy(update={"metadata": metadata})}
+    )
+    output = OutputSettings(frame_rate=f"{rate}/1")
+    plan = build_segment_plan(source, Clip(source_id=source.id), output, tmp_path / "auto.mov")
+    assert plan.frame_count == 2
+    if rate in (30, 120):
+        explicit = build_segment_plan(
+            source,
+            Clip(source_id=source.id, out_point=duration),
+            output,
+            tmp_path / "explicit.mov",
+        )
+        assert explicit.frame_count == 3
+
+
 def test_plan_is_pure_deterministic_and_uses_original_path(source, tmp_path):
     clip = Clip(
         source_id=source.id,
