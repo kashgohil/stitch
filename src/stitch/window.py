@@ -39,6 +39,7 @@ from stitch.document import (
 )
 from stitch.editors import ClipEditor, OutputEditor, OverlayEditor
 from stitch.paths import AppPaths
+from stitch.preview import PreviewPanel
 from stitch.project_io import ProjectError
 from stitch.sources import source_status
 from stitch.workers import ExportWorker, ImportWorker
@@ -77,6 +78,7 @@ class MainWindow(QMainWindow):
         self._exporting = False
         self._export_worker: ExportWorker | None = None
         self._close_after_export = False
+        self._close_after_proxy = False
         self._refreshing = False
         self._selected: UUID | None = None
         self.resize(1200, 850)
@@ -121,7 +123,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.error)
         splitter = QSplitter()
         self.sequence = QGroupBox("Your sequence")
-        sequence_layout = QVBoxLayout(self.sequence)
+        sequence_layout = QVBoxLayout()
+        queue = QWidget()
+        queue.setLayout(sequence_layout)
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(["Clip", "Length", "Video", "Audio", "Source"])
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -131,7 +135,7 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.currentCellChanged.connect(self._selection_changed)
         sequence_layout.addWidget(self.table)
-        self.empty = QLabel("Add videos to build your sequence. Preview is coming next.")
+        self.empty = QLabel("Add videos to build your sequence, then inspect a selected clip.")
         self.empty.setWordWrap(True)
         sequence_layout.addWidget(self.empty)
         ordering = QHBoxLayout()
@@ -147,6 +151,15 @@ class MainWindow(QMainWindow):
             ordering.addWidget(button)
         ordering.addStretch()
         sequence_layout.addLayout(ordering)
+        self.preview = PreviewPanel(paths)
+        self.preview.mark_in.connect(lambda seconds: self._mark_preview(seconds, is_out=False))
+        self.preview.mark_out.connect(lambda seconds: self._mark_preview(seconds, is_out=True))
+        self.preview.idle.connect(self._proxy_idle)
+        self.sequence_tabs = QTabWidget()
+        self.sequence_tabs.addTab(queue, "Clips")
+        self.sequence_tabs.addTab(self.preview, "Selected clip preview")
+        self.sequence_tabs.currentChanged.connect(lambda _: self.preview.player.pause())
+        QVBoxLayout(self.sequence).addWidget(self.sequence_tabs)
         splitter.addWidget(self.sequence)
         self.clip_editor = ClipEditor()
         self.clip_editor.apply_requested.connect(self.apply_edits)
@@ -266,6 +279,7 @@ class MainWindow(QMainWindow):
         self.up.setEnabled(idle and row > 0)
         self.down.setEnabled(idle and 0 <= row < self.table.rowCount() - 1)
         self.remove.setEnabled(idle and row >= 0)
+        self.preview.set_available(idle and self.tools_ready)
 
     def _refresh(self, selected: UUID | None = None) -> None:
         self._refreshing = True
@@ -314,7 +328,7 @@ class MainWindow(QMainWindow):
         self.empty.setVisible(not project.clips)
         self.summary.setText(
             f"{len(project.clips)} clips · {'At least ' if unknown else ''}"
-            f"{total / 60:.2f} min · Preview not yet available"
+            f"{total / 60:.2f} min · Selected-clip proxy preview"
         )
         self._refreshing = False
         self._load_selected()
@@ -328,7 +342,23 @@ class MainWindow(QMainWindow):
         clip = next((clip for clip in project.clips if clip.id == self._selected), None)
         source = next((s for s in project.sources if clip and s.id == clip.source_id), None)
         self.clip_editor.load(clip, source)
+        self.preview.load(clip, source)
         self._update_title()
+
+    def _mark_preview(self, seconds: float, *, is_out: bool) -> None:
+        if self.busy or not self._selected:
+            return
+        if is_out:
+            self.clip_editor.source_end.setChecked(False)
+            self.clip_editor.end.setValue(seconds)
+        else:
+            self.clip_editor.start.setValue(seconds)
+        # Keep this as a draft so the user can correct invalid in/out pairs before Apply.
+
+    def _proxy_idle(self) -> None:
+        if self._close_after_proxy:
+            self._close_after_proxy = False
+            self.close()
 
     def _reset_output(self) -> None:
         self.output_editor.load(self.document.project)
@@ -576,6 +606,10 @@ class MainWindow(QMainWindow):
             self.close()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if not self.preview.shutdown():
+            self._close_after_proxy = True
+            event.ignore()
+            return
         if self._exporting:
             self._close_after_export = True
             self.stop_export()

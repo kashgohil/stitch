@@ -8,12 +8,42 @@ from PySide6.QtCore import QThread, Signal
 
 from stitch.document import match_first_clip
 from stitch.export import export_project
-from stitch.models import Project
+from stitch.models import Project, Source
 from stitch.paths import AppPaths
 from stitch.process import RenderCancelled
+from stitch.proxy import ProxySettings, generate_proxy
 from stitch.sources import add_video, set_overlay
 
 logger = logging.getLogger(__name__)
+
+
+class ProxyWorker(QThread):
+    progress = Signal(float)
+
+    def __init__(self, source: Source, settings: ProxySettings, paths: AppPaths, parent=None):
+        super().__init__(parent)
+        self.source = source
+        self.settings = settings
+        self.paths = paths
+        self.cancel = threading.Event()
+        self.result: Path | None = None
+        self.error = ""
+        self.cancelled = False
+
+    def run(self) -> None:
+        try:
+            self.result = generate_proxy(
+                self.source,
+                self.settings,
+                self.paths,
+                cancel=self.cancel,
+                progress=self.progress.emit,
+            )
+        except RenderCancelled:
+            self.cancelled = True
+        except Exception as exc:
+            logger.exception("Proxy generation failed")
+            self.error = str(exc)
 
 
 class ImportWorker(QThread):
