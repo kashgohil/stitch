@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 Seconds = Annotated[float, Field(ge=0, allow_inf_nan=False)]
 PositiveInt = Annotated[int, Field(gt=0, strict=True)]
+GENERATED_MEDIA_COMMENT = "Stitch generated media (v1)"
 
 
 def rational(value: str) -> str:
@@ -88,6 +89,7 @@ class MediaMetadata(Model):
     duration: Annotated[float, Field(gt=0)]
     video: VideoStream | None = None
     audio: tuple[AudioStream, ...] = ()
+    stitch_generated: bool = False
 
     @model_validator(mode="after")
     def has_media(self) -> Self:
@@ -112,6 +114,20 @@ class Source(Model):
     def absolute_path(cls, value: Path) -> Path:
         if not value.is_absolute():
             raise ValueError("source paths must be absolute")
+        return value
+
+
+class FolderEntry(Model):
+    """An imported path stays remembered even after its last clip is removed."""
+
+    path: Path
+    identity: FileIdentity
+
+    @field_validator("path")
+    @classmethod
+    def absolute_path(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("folder history paths must be absolute")
         return value
 
 
@@ -189,9 +205,20 @@ class Project(Model):
     clips: tuple[Clip, ...] = ()
     overlay: Overlay | None = None
     output: OutputSettings = Field(default_factory=OutputSettings)
+    folder: Path | None = None
+    folder_history: tuple[FolderEntry, ...] = ()
+
+    @field_validator("folder")
+    @classmethod
+    def absolute_folder(cls, value: Path | None) -> Path | None:
+        if value is not None and not value.is_absolute():
+            raise ValueError("folder must be an absolute path")
+        return value
 
     @model_validator(mode="after")
     def valid_references_and_edits(self) -> Self:
+        if len({entry.path for entry in self.folder_history}) != len(self.folder_history):
+            raise ValueError("folder history paths must be unique")
         sources = {source.id: source for source in self.sources}
         if len(sources) != len(self.sources):
             raise ValueError("source IDs must be unique")

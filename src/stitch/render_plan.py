@@ -5,7 +5,15 @@ from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 
-from stitch.models import Clip, Crop, OutputSettings, Project, Source, VideoStream
+from stitch.models import (
+    GENERATED_MEDIA_COMMENT,
+    Clip,
+    Crop,
+    OutputSettings,
+    Project,
+    Source,
+    VideoStream,
+)
 
 # Disable makeup gain and compensate the look-ahead delay.
 PEAK_LIMITER = "alimiter=limit=0.95:level=0:latency=1"
@@ -206,6 +214,8 @@ def build_segment_plan(
         "-1",
         "-map_chapters",
         "-1",
+        "-metadata",
+        f"comment={GENERATED_MEDIA_COMMENT}",
         "-metadata:s:v:0",
         "rotate=0",
         "-c:v",

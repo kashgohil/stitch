@@ -20,7 +20,7 @@ from stitch.audio import (
 )
 from stitch.joins import plan_crossfades, render_join_chunk
 from stitch.media import MediaError, file_identity, probe_media
-from stitch.models import MediaMetadata, Project
+from stitch.models import GENERATED_MEDIA_COMMENT, MediaMetadata, Project
 from stitch.paths import AppPaths
 from stitch.process import RenderCancelled, check_cancelled, progress_command, run_ffmpeg
 from stitch.render import render_segment
@@ -170,6 +170,8 @@ def concat_command(
         "-1",
         "-map_chapters",
         "-1",
+        "-metadata",
+        f"comment={GENERATED_MEDIA_COMMENT}",
         "-c:v",
         "copy",
         "-video_track_timescale",

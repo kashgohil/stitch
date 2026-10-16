@@ -10,7 +10,14 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from stitch.models import AudioStream, FileIdentity, MediaMetadata, VideoStream, rational
+from stitch.models import (
+    GENERATED_MEDIA_COMMENT,
+    AudioStream,
+    FileIdentity,
+    MediaMetadata,
+    VideoStream,
+    rational,
+)
 from stitch.tool_setup import external_tool_environment
 
 
@@ -153,6 +160,8 @@ def parse_metadata(raw: dict) -> MediaMetadata:
             duration=duration,
             video=video,
             audio=audio,
+            stitch_generated=raw.get("format", {}).get("tags", {}).get("comment")
+            == GENERATED_MEDIA_COMMENT,
         )
     except (ValidationError, KeyError, TypeError, AttributeError) as exc:
         raise MediaError(f"ffprobe returned incomplete or invalid stream metadata: {exc}") from exc
@@ -165,7 +174,7 @@ def probe_media(path: Path, *, timeout: float = 30.0) -> MediaMetadata:
     if executable is None:
         raise MediaError("ffprobe is missing. Install FFmpeg and add its binary directory to PATH.")
     entries = (
-        "format=format_name,duration:"
+        "format=format_name,duration:format_tags=comment:"
         "stream=index,codec_type,codec_name,width,height,pix_fmt,bits_per_raw_sample,"
         "bits_per_sample,avg_frame_rate,r_frame_rate,time_base,sample_aspect_ratio,"
         "duration,start_time,color_primaries,color_transfer,color_space,color_range,"

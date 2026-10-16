@@ -40,7 +40,7 @@ def proxy_key(source: Source, settings: ProxySettings) -> str:
         raise RenderError("Inspect the original video before creating a proxy.")
     # Cache version includes the clock, codecs, 30 fps, and encoding recipe below.
     payload = {
-        "version": 2,
+        "version": 3,
         "path": str(source.path),
         "cache": source.cache.model_dump(mode="json"),
         "height": settings.height,

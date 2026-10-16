@@ -7,7 +7,7 @@ from typing import Literal
 from pydantic import ValidationError
 
 from stitch.media import MediaError, MissingSourceError, file_identity, probe_media
-from stitch.models import Clip, Overlay, ProbeCache, Project, Source
+from stitch.models import Clip, FolderEntry, Overlay, ProbeCache, Project, Source
 from stitch.project_io import ProjectError
 
 
@@ -69,8 +69,19 @@ def _updated_sources(project: Project, source: Source) -> tuple[Source, ...]:
 def add_video(project: Project, path: Path) -> Project:
     """Return a new validated project. A failed import leaves the old one intact."""
     source = _import_source(project, path)
+    return append_video_source(project, source)
+
+
+def append_video_source(project: Project, source: Source) -> Project:
+    """Commit a successfully inspected video and its import history together."""
     if source.cache.metadata.video is None:
-        raise MediaError(f"{path.name} contains audio but no video. Use it as overlay audio.")
+        raise MediaError(
+            f"{source.path.name} contains audio but no video. Use it as overlay audio."
+        )
+    history = project.folder_history
+    if source.path.parent == project.folder or any(e.path == source.path for e in history):
+        entry = FolderEntry(path=source.path, identity=source.cache.identity)
+        history = tuple(e for e in history if e.path != source.path) + (entry,)
     try:
         return Project(
             name=project.name,
@@ -78,6 +89,8 @@ def add_video(project: Project, path: Path) -> Project:
             clips=(*project.clips, Clip(source_id=source.id)),
             overlay=project.overlay,
             output=project.output,
+            folder=project.folder,
+            folder_history=history,
         )
     except ValidationError as exc:
         raise ProjectError(f"Updated source conflicts with existing edits: {exc}") from exc
@@ -103,6 +116,8 @@ def set_overlay(project: Project, path: Path) -> Project:
             if previous
             else Overlay(source_id=source.id),
             output=project.output,
+            folder=project.folder,
+            folder_history=project.folder_history,
         )
     except ValidationError as exc:
         raise ProjectError(f"Updated source conflicts with existing edits: {exc}") from exc
