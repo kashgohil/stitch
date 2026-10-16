@@ -56,7 +56,7 @@ def test_real_video_with_rotation_and_fractional_fps(tmp_path):
 
 
 @pytest.mark.parametrize("dimensions", [(3840, 2160), (7680, 4320)])
-def test_real_high_resolution_10bit_120fps_metadata(tmp_path, dimensions):
+def test_real_high_resolution_10bit_120fps_metadata(tmp_path, dimensions, qtbot):
     width, height = dimensions
     path = tmp_path / "high resolution.mkv"
     generate(
@@ -86,6 +86,35 @@ def test_real_high_resolution_10bit_120fps_metadata(tmp_path, dimensions):
     assert info.video.bit_depth == 10
     assert info.video.color_transfer == "bt709"
     assert not info.audio
+
+    # Exercise real import through the desktop, including cache reuse and save/reopen.
+    from stitch.paths import AppPaths
+    from stitch.window import MainWindow
+
+    window = MainWindow(AppPaths(*(tmp_path / name for name in ("p", "c", "j", "l"))))
+    qtbot.addWidget(window)
+    qtbot.waitUntil(lambda: window.tools_ready, timeout=15000)
+    try:
+        window.import_paths([path] * 10)
+        qtbot.waitUntil(lambda: not window._importing, timeout=35000)
+        assert len(window.document.project.clips) == 10
+        assert len(window.document.project.sources) == 1
+        assert window.document.project.output.width == width
+        assert window.document.project.output.height == height
+        assert window.output_editor.fps.currentText() == "120/1"
+        assert "10-bit" in window.clip_editor.metadata.text()
+        saved_path = tmp_path / "high-resolution.stitch.json"
+        assert window.save_to_path(saved_path)
+        expected = window.document.project
+        window.new_project()
+        assert window.open_path(saved_path)
+        assert window.document.project == expected
+    finally:
+        if window._importing:
+            window.stop_import()
+            qtbot.waitUntil(lambda: not window._importing, timeout=35000)
+        window.document.saved = window.document.project  # No prompt during test cleanup.
+        window.close()
 
 
 def test_real_24bit_audio_and_corrupt_file(tmp_path):

@@ -2,9 +2,9 @@
 
 A desktop video assembler for arranging, trimming, and cropping clips and adding
 audio to long-form video. The current build includes the desktop shell, media-tool
-checks, a versioned project model, atomic save/open, and cached media probing.
-Import services are available in Python; their desktop controls are the next step.
-Preview and export are upcoming issues.
+checks, a clip queue with trim/crop and source-audio controls, output settings,
+atomic save/open, and cached media probing. Preview, overlay-audio controls,
+and export are upcoming issues.
 
 ## Setup and launch
 
@@ -41,6 +41,33 @@ uv run stitch --check
 This prints the resolved tools and storage paths. Exit code 0 means setup passed;
 1 means a tool or storage directory needs attention.
 
+## Build a sequence
+
+1. Choose **Add videos…** and select your clips. Metadata inspection runs in the
+   background; it does not load entire videos into memory. **Stop import** keeps
+   successful imports and stops after the current inspection finishes (up to
+   30 seconds). Failed files are listed without discarding other imported clips.
+2. Select a row. Use **Move up**, **Move down**, and **Remove clip** to arrange it.
+   Removing a clip never deletes its source file.
+3. Set in/out points in seconds, or leave **Use source end** checked. Enable
+   **Crop this clip** to enter a rectangle in rotated source pixels. Uncheck
+   **Keep source audio** to mute that clip. Apply changes or select another clip
+   to validate the edits; invalid drafts stay visible for correction or reset.
+4. Choose output dimensions, an exact frame rate, and a profile. A new project
+   matches its first successful import's dimensions and reported frame rate
+   unless you have already changed the output settings. Odd source dimensions
+   round up to even output dimensions. Profiles are saved choices, not yet
+   executable exports or guarantees of hardware support.
+5. **Save** or **Save as…** writes a `.json` project. **Open…** restores the queue
+   and settings. An asterisk in the title indicates unsaved changes or pending
+   edits. New, Open, and Close prompt to save, discard, or cancel when necessary.
+
+The Source column flags missing or changed files without removing their edits.
+Reimporting an existing source refreshes its metadata and adds another clip;
+incompatible refreshed metadata is rejected. Relinking is not implemented yet.
+There is no playback or export in this build. Tests cover short 4K/8K metadata
+fixtures, not sustained high-resolution playback or multi-hour export performance.
+
 ## Media and project diagnostics
 
 ```sh
@@ -76,9 +103,10 @@ a project. Relinking projects across machines is future work.
 Frame rates use exact rational strings (`30000/1001`, `120/1`). Trim values are
 seconds; out-points are exclusive. Crop rectangles use source pixels after
 rotation, before scaling; sample aspect ratio is stored separately. Output
-settings must be selected deliberately before export; current model defaults
-are 3840×2160, 30000/1001 fps, HEVC Main10. Probing does not change output settings
-or validate export support. Missing metadata stays unknown, and 10-bit metadata
+settings must be reviewed before export; empty-project model defaults are
+3840×2160, 30000/1001 fps, HEVC Main10. The UI matches the first import as described
+above; standalone probing does not change settings or validate export support.
+Missing metadata stays unknown, and 10-bit metadata
 does not imply HDR processing support.
 
 Probing invokes ffprobe on a local regular file with a 30-second timeout and
@@ -126,7 +154,10 @@ FFmpeg is supplied locally, not bundled with this prototype.
 ## Code layout
 
 - `src/stitch/app.py`: entry point, logging, diagnostic command.
-- `src/stitch/window.py`: desktop shell and background startup checks.
+- `src/stitch/window.py`: clip queue, project actions, and background startup checks.
+- `src/stitch/editors.py`: validated trim/crop, source-audio, and output draft controls.
+- `src/stitch/document.py`: immutable editing operations and save-point tracking.
+- `src/stitch/workers.py`: cancellable, sequential background import.
 - `src/stitch/dependencies.py`: executable discovery and bounded version probes.
 - `src/stitch/paths.py`: application storage and isolated job directories.
 - `src/stitch/models.py`: validated project and media models; generated JSON Schema.
@@ -136,4 +167,4 @@ FFmpeg is supplied locally, not bundled with this prototype.
 - `tests/`: model, storage, source-cache, media integration, CLI, and Qt lifecycle checks.
 
 Plan: [DOC-62 — Stitch weekend plan](https://rezee.app/kash/docs/62).
-Next: [ISSUE-1143 — Clip queue and project controls](https://rezee.app/kash/plan/1143).
+Next: [ISSUE-1145 — Rendering pipeline](https://rezee.app/kash/plan/1145).

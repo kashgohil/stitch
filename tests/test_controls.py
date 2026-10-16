@@ -153,6 +153,26 @@ def test_manual_output_not_replaced_by_import(window, qtbot, tmp_path):
     assert window.document.project.output.frame_rate == "24/1"
 
 
+def test_project_name_alone_does_not_disable_native_output_matching(window, qtbot, tmp_path):
+    window.output_editor.name.setText("My footage")
+    import_clips(window, qtbot, tmp_path)
+    assert window.document.project.name == "My footage"
+    assert window.document.project.output.width == 7680
+
+
+def test_reopen_missing_source_retains_edits_and_shows_warning(window, qtbot, tmp_path):
+    paths = import_clips(window, qtbot, tmp_path)
+    window.clip_editor.start.setValue(2)
+    project_path = tmp_path / "project.json"
+    assert window.save_to_path(project_path)
+    before = window.document.project
+    paths[0].unlink()
+    assert window.open_path(project_path)
+    assert window.document.project == before
+    assert window.table.item(0, 4).text() == "missing"
+    assert window.clip_editor.start.value() == 2
+
+
 def test_import_is_background_partial_failure_and_cancellation(
     window,
     qtbot,

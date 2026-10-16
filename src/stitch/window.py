@@ -300,9 +300,9 @@ class MainWindow(QMainWindow):
         except (ValidationError, ProjectError) as exc:
             self._show_error(readable_error(exc))
             return False
-        self.document.project = project
-        if self.output_editor.pending:
+        if project.output != self.document.project.output:
             self.document.output_configured = True
+        self.document.project = project
         self.clip_editor.pending = self.output_editor.pending = False
         self._show_error("")
         self._update_title()
