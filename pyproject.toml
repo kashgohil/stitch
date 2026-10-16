@@ -21,6 +21,7 @@ packages = ["src/stitch"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 qt_api = "pyside6"
+markers = ["integration: runs locally installed FFmpeg and ffprobe"]
 
 [tool.ruff]
 target-version = "py312"
