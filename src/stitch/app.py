@@ -38,7 +38,21 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_argument(
         "--project-schema", action="store_true", help="Print the project JSON Schema"
     )
+    commands.add_argument(
+        "--render-clip",
+        type=Path,
+        metavar="PROJECT",
+        help="Render one original-media clip into an isolated diagnostic job (not a final export)",
+    )
+    parser.add_argument(
+        "--clip-index",
+        type=int,
+        metavar="N",
+        help="One-based clip number for --render-clip (default: 1)",
+    )
     args = parser.parse_args(argv)
+    if args.clip_index is not None and (not args.render_clip or args.clip_index < 1):
+        parser.error("--clip-index requires --render-clip and a positive one-based number")
     if args.probe or args.inspect_project or args.project_schema:
         from stitch.media import MediaError, probe_media
         from stitch.models import Project
@@ -77,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         message = (
             f"Cannot initialize Stitch storage: {exc}. Check folder permissions and free space."
         )
-        if args.check:
+        if args.check or args.render_clip:
             print(message, file=sys.stderr)
         else:
             from PySide6.QtWidgets import QApplication, QMessageBox
@@ -100,6 +114,35 @@ def main(argv: list[str] | None = None) -> int:
         )
         if not all(tool.available for tool in tools):
             print(installation_help(), file=sys.stderr)
+            return 1
+        return 0
+
+    if args.render_clip:
+        from stitch.project_io import ProjectError, load_project
+        from stitch.render import render_segment
+        from stitch.render_plan import RenderError
+
+        try:
+            project = load_project(args.render_clip)
+            index = (args.clip_index or 1) - 1
+            if index >= len(project.clips):
+                raise RenderError(
+                    f"Project has {len(project.clips)} clips; choose a valid clip number."
+                )
+            result = render_segment(project, project.clips[index].id, paths)
+            print(
+                json.dumps(
+                    {
+                        "path": str(result.path),
+                        "job": str(result.job),
+                        "warnings": result.warnings,
+                        "metadata": result.metadata.model_dump(mode="json"),
+                    },
+                    indent=2,
+                )
+            )
+        except (RenderError, ProjectError) as exc:
+            print(str(exc), file=sys.stderr)
             return 1
         return 0
 
