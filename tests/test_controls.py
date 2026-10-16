@@ -272,3 +272,86 @@ def test_typed_spin_values_are_pending_before_focus_moves(window, qtbot, tmp_pat
     qtbot.keyClick(window.output_editor.width, Qt.Key.Key_Return)
     assert window.save_to_path(tmp_path / "typed.json")
     assert window.document.project.output.width == 3840
+
+
+def test_export_disables_edits_reports_progress_and_restores_controls(
+    window,
+    qtbot,
+    tmp_path,
+    monkeypatch,
+    metadata,
+):
+    from stitch.export import ExportProgress, ExportResult
+
+    import_clips(window, qtbot, tmp_path)
+    started, release = threading.Event(), threading.Event()
+    thread_ids = []
+    output = tmp_path / "final.mp4"
+
+    def export(project, destination, paths, **kwargs):
+        thread_ids.append(threading.current_thread().ident)
+        kwargs["progress"](ExportProgress("rendering", 1, 1, 0.5, 0.45, 2, "Rendering clip 1/1"))
+        started.set()
+        release.wait(timeout=3)
+        return ExportResult(destination, tmp_path / "job", metadata, ())
+
+    monkeypatch.setattr("stitch.workers.export_project", export)
+    try:
+        window.start_export(output)
+        qtbot.waitUntil(started.is_set)
+        qtbot.waitUntil(lambda: window.export_progress.value() == 450)
+        assert window.busy and not window.add.isEnabled() and not window.save.isEnabled()
+        assert not window.export.isEnabled() and window.cancel_export.isEnabled()
+        assert not window.output_editor.isEnabled()
+        assert "50%" in window.export_status.text()
+    finally:
+        release.set()
+        qtbot.waitUntil(lambda: not window._exporting)
+    assert window.export_progress.value() == 1000
+    assert window.export.isEnabled() and window.add.isEnabled()
+    assert str(output) in window.export_status.text()
+    assert threading.current_thread().ident not in thread_ids
+
+
+def test_close_during_export_cancels_and_waits_for_worker(window, qtbot, tmp_path, monkeypatch):
+    from stitch.process import RenderCancelled
+
+    import_clips(window, qtbot, tmp_path)
+    started = threading.Event()
+
+    def export(project, destination, paths, **kwargs):
+        started.set()
+        kwargs["cancel"].wait(timeout=3)
+        raise RenderCancelled("Export cancelled. Diagnostics retained.")
+
+    monkeypatch.setattr("stitch.workers.export_project", export)
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Cancel)
+    try:
+        window.start_export(tmp_path / "final.mp4")
+        qtbot.waitUntil(started.is_set)
+        window.close()
+        assert window.isVisible()
+        qtbot.waitUntil(lambda: not window._exporting)
+        assert window.isVisible()  # Unsaved-project cancellation is still respected afterward.
+        assert window.export_status.text() == "Export cancelled."
+        assert "Diagnostics" in window.error.toPlainText()
+    finally:
+        window.stop_export()
+        qtbot.waitUntil(lambda: not window._exporting)
+        monkeypatch.setattr(
+            QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Discard
+        )
+
+
+def test_export_failure_restores_controls(window, qtbot, tmp_path, monkeypatch):
+    import_clips(window, qtbot, tmp_path)
+
+    def export(*args, **kwargs):
+        raise OSError("Disk is full")
+
+    monkeypatch.setattr("stitch.workers.export_project", export)
+    window.start_export(tmp_path / "final.mp4")
+    qtbot.waitUntil(lambda: not window._exporting)
+    assert window.export_status.text() == "Export failed."
+    assert "Disk is full" in window.error.toPlainText()
+    assert window.export.isEnabled() and window.save.isEnabled()

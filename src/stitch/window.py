@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSplitter,
@@ -32,7 +33,7 @@ from stitch.editors import ClipEditor, OutputEditor
 from stitch.paths import AppPaths
 from stitch.project_io import ProjectError
 from stitch.sources import source_status
-from stitch.workers import ImportWorker
+from stitch.workers import ExportWorker, ImportWorker
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,9 @@ class MainWindow(QMainWindow):
         self._worker: DependencyWorker | None = None
         self._import_worker: ImportWorker | None = None
         self._importing = False
+        self._exporting = False
+        self._export_worker: ExportWorker | None = None
+        self._close_after_export = False
         self._refreshing = False
         self._selected: UUID | None = None
         self.resize(1200, 850)
@@ -85,6 +89,7 @@ class MainWindow(QMainWindow):
         self.save = QPushButton("Save")
         self.save_as = QPushButton("Save as…")
         self.add = QPushButton("Add videos…")
+        self.export = QPushButton("Export…")
         self.cancel_import = QPushButton("Stop import")
         for button, callback in (
             (self.new, self.new_project),
@@ -92,6 +97,7 @@ class MainWindow(QMainWindow):
             (self.save, self.save_current),
             (self.save_as, self.choose_save_as),
             (self.add, self.choose_videos),
+            (self.export, self.choose_export),
             (self.cancel_import, self.stop_import),
         ):
             button.clicked.connect(callback)
@@ -117,9 +123,7 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.currentCellChanged.connect(self._selection_changed)
         sequence_layout.addWidget(self.table)
-        self.empty = QLabel(
-            "Add videos to build your sequence. Preview and export are coming next."
-        )
+        self.empty = QLabel("Add videos to build your sequence. Preview is coming next.")
         self.empty.setWordWrap(True)
         sequence_layout.addWidget(self.empty)
         ordering = QHBoxLayout()
@@ -152,6 +156,22 @@ class MainWindow(QMainWindow):
         self.output_editor.reset_requested.connect(self._reset_output)
         self.output_editor.changed.connect(self._update_title)
         layout.addWidget(self.output_editor)
+        self.export_panel = QGroupBox("Export")
+        export_layout = QVBoxLayout(self.export_panel)
+        self.export_status = QLabel()
+        self.export_status.setWordWrap(True)
+        export_layout.addWidget(self.export_status)
+        export_row = QHBoxLayout()
+        self.export_progress = QProgressBar()
+        self.export_progress.setRange(0, 1000)
+        self.export_progress.setAccessibleName("Whole export progress")
+        export_row.addWidget(self.export_progress, 1)
+        self.cancel_export = QPushButton("Cancel export")
+        self.cancel_export.clicked.connect(self.stop_export)
+        export_row.addWidget(self.cancel_export)
+        export_layout.addLayout(export_row)
+        self.export_panel.hide()
+        layout.addWidget(self.export_panel)
         checks = QGroupBox("Media tools")
         checks_layout = QVBoxLayout(checks)
         buttons = QHBoxLayout()
@@ -202,7 +222,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{self.document.project.name}{' *' if dirty else ''} — Stitch")
 
     def _update_controls(self) -> None:
-        idle = not self._importing
+        idle = not self.busy
         for widget in (
             self.new,
             self.open,
@@ -216,8 +236,9 @@ class MainWindow(QMainWindow):
         for action in self.file_actions:
             action.setEnabled(idle)
         self.add.setEnabled(idle and self.tools_ready)
+        self.export.setEnabled(idle and self.tools_ready and bool(self.document.project.clips))
         self.retry.setEnabled(idle and self._worker is not None and not self._worker.isRunning())
-        self.cancel_import.setVisible(not idle)
+        self.cancel_import.setVisible(self._importing)
         row = self.table.currentRow()
         self.up.setEnabled(idle and row > 0)
         self.down.setEnabled(idle and 0 <= row < self.table.rowCount() - 1)
@@ -270,7 +291,7 @@ class MainWindow(QMainWindow):
         self.empty.setVisible(not project.clips)
         self.summary.setText(
             f"{len(project.clips)} clips · {'At least ' if unknown else ''}"
-            f"{total / 60:.2f} min · Preview and export not yet available"
+            f"{total / 60:.2f} min · Preview not yet available"
         )
         self._refreshing = False
         self._load_selected()
@@ -310,7 +331,7 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def apply_edits(self) -> None:
-        if not self._importing and self._apply_pending():
+        if not self.busy and self._apply_pending():
             self._refresh(self._selected)
 
     def _selection_changed(self, row: int, column: int, old_row: int, old_column: int) -> None:
@@ -327,13 +348,13 @@ class MainWindow(QMainWindow):
         self._refresh(selected)
 
     def move_selected(self, offset: int) -> None:
-        if not self._importing and self._selected and self._apply_pending():
+        if not self.busy and self._selected and self._apply_pending():
             self.document.project = move_clip(self.document.project, self._selected, offset)
             self._refresh(self._selected)
 
     @Slot()
     def remove_selected(self) -> None:
-        if self._importing or not self._selected:
+        if self.busy or not self._selected:
             return
         pending = self.clip_editor.pending
         self.clip_editor.pending = False  # Removing a clip also discards its draft edits.
@@ -349,7 +370,7 @@ class MainWindow(QMainWindow):
         self.import_paths([Path(path) for path in paths])
 
     def import_paths(self, paths: list[Path]) -> None:
-        if self._importing or not self.tools_ready or not paths or not self._apply_pending():
+        if self.busy or not self.tools_ready or not paths or not self._apply_pending():
             return
         if self._import_worker:
             self._import_worker.deleteLater()
@@ -413,7 +434,7 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def new_project(self) -> None:
-        if not self._importing and self._confirm_replace():
+        if not self.busy and self._confirm_replace():
             self.document = Document()
             self._refresh()
             self._show_error("")
@@ -430,7 +451,7 @@ class MainWindow(QMainWindow):
             self.open_path(Path(path))
 
     def open_path(self, path: Path) -> bool:
-        if self._importing or not self._confirm_replace():
+        if self.busy or not self._confirm_replace():
             return False
         try:
             self.document.open(path)
@@ -443,7 +464,7 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def save_current(self) -> bool:
-        if self._importing:
+        if self.busy:
             return False
         return (
             self.save_to_path(self.document.path) if self.document.path else self.choose_save_as()
@@ -451,7 +472,7 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def choose_save_as(self) -> bool:
-        if self._importing:
+        if self.busy:
             return False
         path, _ = QFileDialog.getSaveFileName(
             self,
@@ -462,7 +483,7 @@ class MainWindow(QMainWindow):
         return self.save_to_path(Path(path)) if path else False
 
     def save_to_path(self, path: Path) -> bool:
-        if self._importing or not self._apply_pending():
+        if self.busy or not self._apply_pending():
             return False
         try:
             self.document.save(path)
@@ -475,7 +496,7 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def check_dependencies(self) -> None:
-        if self._closing or self._importing or (self._worker and self._worker.isRunning()):
+        if self._closing or self.busy or (self._worker and self._worker.isRunning()):
             return
         self.tools_ready = False
         self.status.setText("Checking media tools…")
@@ -513,6 +534,11 @@ class MainWindow(QMainWindow):
             self.close()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self._exporting:
+            self._close_after_export = True
+            self.stop_export()
+            event.ignore()
+            return
         if self._importing:
             self._close_after_import = True
             self.stop_import()
@@ -527,3 +553,79 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         event.accept()
+
+    @property
+    def busy(self) -> bool:
+        return self._importing or self._exporting
+
+    @Slot()
+    def choose_export(self) -> None:
+        if self.busy or not self._apply_pending():
+            return
+        suffix = ".mov" if self.document.project.output.profile == "prores_hq" else ".mp4"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export sequence",
+            str(self.paths.projects / ("Untitled" + suffix)),
+            f"Video (*{suffix})",
+        )
+        if path:
+            # The native save dialog has already asked to confirm replacement, if needed.
+            self.start_export(Path(path), overwrite=Path(path).exists())
+
+    def start_export(self, destination: Path, *, overwrite: bool = False) -> None:
+        if self.busy or not self.tools_ready or not self._apply_pending():
+            return
+        if self.document.path and destination.resolve() == self.document.path.resolve():
+            self._show_error("Export cannot overwrite the open project file.")
+            return
+        self._refresh(self._selected)
+        if self._export_worker:
+            self._export_worker.deleteLater()
+        self._export_worker = ExportWorker(
+            self.document.project, destination, self.paths, overwrite=overwrite, parent=self
+        )
+        self._export_worker.progress.connect(self._export_update)
+        self._export_worker.finished.connect(self._export_finished)
+        self._exporting = True
+        self.export_panel.show()
+        self.export_status.setText("Checking sources and disk space…")
+        self.export_progress.setValue(0)
+        self.cancel_export.setEnabled(True)
+        self._update_controls()
+        self._export_worker.start()
+
+    @Slot(object)
+    def _export_update(self, update) -> None:
+        self.export_progress.setValue(round(update.fraction * 1000))
+        detail = f" · Clip {update.clip_fraction:.0%}" if update.stage == "rendering" else ""
+        self.export_status.setText(
+            f"{update.message}{detail} · Overall {update.fraction:.0%} "
+            f"· Elapsed {update.elapsed:.0f}s"
+        )
+
+    @Slot()
+    def stop_export(self) -> None:
+        if self._exporting:
+            self._export_worker.cancel.set()
+            self.cancel_export.setEnabled(False)
+            self.export_status.setText("Cancelling export; waiting for active media work to stop…")
+
+    @Slot()
+    def _export_finished(self) -> None:
+        worker = self._export_worker
+        self._exporting = False
+        self.cancel_export.setEnabled(False)
+        self._update_controls()
+        if worker.result:
+            self.export_progress.setValue(1000)
+            self.export_status.setText(f"Exported {worker.result.path}")
+            self._show_error("\n".join(worker.result.warnings))
+        else:
+            self.export_status.setText(
+                "Export cancelled." if worker.cancelled else "Export failed."
+            )
+            self._show_error(worker.error)
+        if self._close_after_export:
+            self._close_after_export = False
+            self.close()

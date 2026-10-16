@@ -3,7 +3,9 @@
 import argparse
 import json
 import logging
+import signal
 import sys
+import threading
 from dataclasses import asdict
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -50,9 +52,16 @@ def main(argv: list[str] | None = None) -> int:
         metavar="N",
         help="One-based clip number for --render-clip (default: 1)",
     )
+    commands.add_argument("--export", type=Path, metavar="PROJECT", help="Export a saved sequence")
+    parser.add_argument("--output", type=Path, metavar="FILE", help="Final path for --export")
+    parser.add_argument(
+        "--overwrite", action="store_true", help="Allow --export to replace its output"
+    )
     args = parser.parse_args(argv)
     if args.clip_index is not None and (not args.render_clip or args.clip_index < 1):
         parser.error("--clip-index requires --render-clip and a positive one-based number")
+    if bool(args.export) != bool(args.output) or (args.overwrite and not args.export):
+        parser.error("--export requires --output; --output and --overwrite require --export")
     if args.probe or args.inspect_project or args.project_schema:
         from stitch.media import MediaError, probe_media
         from stitch.models import Project
@@ -91,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         message = (
             f"Cannot initialize Stitch storage: {exc}. Check folder permissions and free space."
         )
-        if args.check or args.render_clip:
+        if args.check or args.render_clip or args.export:
             print(message, file=sys.stderr)
         else:
             from PySide6.QtWidgets import QApplication, QMessageBox
@@ -115,6 +124,50 @@ def main(argv: list[str] | None = None) -> int:
         if not all(tool.available for tool in tools):
             print(installation_help(), file=sys.stderr)
             return 1
+        return 0
+
+    if args.export:
+        from stitch.export import export_project
+        from stitch.process import RenderCancelled
+        from stitch.project_io import ProjectError, load_project
+        from stitch.render_plan import RenderError
+
+        cancel = threading.Event()
+        previous_handler = signal.signal(signal.SIGINT, lambda *_: cancel.set())
+        last_update = [None]
+
+        def show_progress(update):
+            key = (update.stage, int(update.fraction * 100))
+            if key != last_update[0]:
+                print(
+                    f"{update.message} · {update.fraction:.0%} · {update.elapsed:.0f}s",
+                    file=sys.stderr,
+                )
+                last_update[0] = key
+
+        try:
+            result = export_project(
+                load_project(args.export),
+                args.output,
+                paths,
+                overwrite=args.overwrite,
+                cancel=cancel,
+                progress=show_progress,
+            )
+            print(
+                json.dumps(
+                    {"path": str(result.path), "job": str(result.job), "warnings": result.warnings},
+                    indent=2,
+                )
+            )
+        except RenderCancelled as exc:
+            print(str(exc), file=sys.stderr)
+            return 130
+        except (RenderError, ProjectError, OSError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        finally:
+            signal.signal(signal.SIGINT, previous_handler)
         return 0
 
     if args.render_clip:

@@ -44,3 +44,12 @@ def test_render_cli_validates_clip_index(args):
     with pytest.raises(SystemExit) as exc:
         main(args)
     assert exc.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "args", [["--export", "project.json"], ["--output", "final.mp4"], ["--overwrite"]]
+)
+def test_export_cli_requires_explicit_input_and_output(args):
+    with pytest.raises(SystemExit) as exc:
+        main(args)
+    assert exc.value.code == 2
