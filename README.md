@@ -3,8 +3,8 @@
 A desktop video assembler for arranging, trimming, and cropping clips and adding
 audio to long-form video. The current build includes the desktop shell, media-tool
 checks, a clip queue with trim/crop and source-audio controls, output settings,
-atomic save/open, and cached media probing. Preview, overlay-audio controls,
-and export are upcoming issues.
+atomic save/open, cached media probing, and a single-clip software render core.
+Preview, overlay-audio controls, and full-sequence export are upcoming issues.
 
 ## Setup and launch
 
@@ -65,8 +65,62 @@ This prints the resolved tools and storage paths. Exit code 0 means setup passed
 The Source column flags missing or changed files without removing their edits.
 Reimporting an existing source refreshes its metadata and adds another clip;
 incompatible refreshed metadata is rejected. Relinking is not implemented yet.
-There is no playback or export in this build. Tests cover short 4K/8K metadata
-fixtures, not sustained high-resolution playback or multi-hour export performance.
+There is no playback or final sequence export in the UI yet. A terminal diagnostic
+can render one clip as described below. Tests cover short 4K/8K render fixtures,
+not sustained high-resolution playback or multi-hour export performance.
+
+## Render one clip (developer diagnostic)
+
+Save a project in the UI, then run:
+
+```sh
+uv run stitch --render-clip "/path/to/project.stitch.json" --clip-index 1
+```
+
+Clip numbers are one-based. This reads the saved project, uses its original
+source media and edit/output settings, and renders one normalized MOV segment
+in a new job directory. It does not assemble the sequence, mix overlay audio,
+or publish a final delivery file. The command prints the segment path, job path,
+validated output metadata, and any assumptions/warnings as JSON. Failure returns
+exit code 1 with a diagnostic path. No Qt window is opened.
+
+The renderer supports:
+
+- Timestamp-aware trim, including nonzero source clocks and delayed source audio.
+- Automatic orthogonal rotation, then static crop, aspect-preserving Lanczos
+  fit, and black padding. Upscaling stays disabled unless selected in the project.
+  Pixel aspect ratio is accounted for; fitted dimensions round down to even pixels.
+- Constant output frame rate. Segment duration rounds up to the next output frame;
+  the last video frame and silence cover the rounding interval. Trims must contain
+  at least one decoded video frame. PCM duration rounds to the nearest audio sample.
+- Software `libx265` Main10 (`yuv420p10le`), `libx264` High (`yuv420p`), and
+  `prores_ks` 422 HQ (`yuv422p10le`). Pixel format fallback is disabled and output
+  metadata is checked. H.264 deliberately reduces higher-bit-depth input to 8-bit.
+- Source-audio gain and mute; stereo 48 kHz, 24-bit PCM for every intermediate,
+  including silence for clips without usable audio in the selected interval.
+
+All intermediate profiles use PCM, not AAC, to avoid repeated lossy audio encoding
+and per-clip AAC encoder delay. Final delivery AAC encoding belongs to assembly
+and audio mixing. Intermediate files can be large. Defaults are CRF 18 and the
+medium preset for H.264/HEVC, with two encoder/filter threads; Python callers can
+configure `RenderOptions(crf=..., preset=..., threads=...)`. ProRes uses HQ rather
+than CRF. Performance depends on resolution, codec, storage, and machine.
+
+Detected PQ/HLG HDR input is rejected: this is not an HDR conversion pipeline.
+Known SDR color tags are retained and range is normalized to limited range.
+Unknown range assumes limited; unknown pixel aspect ratio assumes square pixels,
+both with warnings. Mixed-color-space sequence handling is not implemented yet.
+
+Rendering checks source identity before and after execution, rejects stale caches,
+and verifies output dimensions, codec/pixel format, rate, timestamps, and duration.
+Each job keeps `status.json` (including arguments and state) and `ffmpeg.log`.
+Successful and failed diagnostic jobs are retained; no source or existing final
+output is overwritten. Progress, cancellable jobs, disk estimates, final-output
+publication, and automatic cleanup are part of the next assembly issue. Do not
+call the synchronous `render_segment()` API on the GUI thread.
+
+Implementation references: [FFmpeg command options](https://ffmpeg.org/ffmpeg.html)
+and [filter documentation](https://ffmpeg.org/ffmpeg-filters.html).
 
 ## Media and project diagnostics
 
@@ -134,6 +188,10 @@ For headless environments, set `QT_QPA_PLATFORM=offscreen` before running pytest
 Unit tests use temporary directories and simulated media checks. Integration
 tests generate short files using locally installed FFmpeg (mpeg4/AAC, FFV1, PCM)
 and inspect them with ffprobe, including one-frame 4K/8K 10-bit 120 fps fixtures.
+Render checks exercise all three software profiles, 4K H.264 and 8K HEVC at 120 fps,
+and decoded-pixel/audio-sample checks for trim, crop/padding, rotation, and A/V offset.
+These are correctness fixtures, not throughput benchmarks. Encoder-specific tests
+skip when the local FFmpeg build lacks that encoder.
 They skip when either binary is missing and require FFmpeg 6 or newer for the
 rotation fixture. No existing source footage is needed. To run unit tests only:
 
@@ -164,7 +222,9 @@ FFmpeg is supplied locally, not bundled with this prototype.
 - `src/stitch/project_io.py`: versioned reads and atomic writes.
 - `src/stitch/media.py`: local ffprobe adapter and stream metadata normalization.
 - `src/stitch/sources.py`: import services and cache freshness checks.
+- `src/stitch/render_plan.py`: pure segment command generation and encoder profiles.
+- `src/stitch/render.py`: isolated single-segment execution, diagnostics, and validation.
 - `tests/`: model, storage, source-cache, media integration, CLI, and Qt lifecycle checks.
 
 Plan: [DOC-62 — Stitch weekend plan](https://rezee.app/kash/docs/62).
-Next: [ISSUE-1145 — Rendering pipeline](https://rezee.app/kash/plan/1145).
+Next: [ISSUE-1146 — Safe long-form export](https://rezee.app/kash/plan/1146).
