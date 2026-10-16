@@ -17,11 +17,15 @@ class MediaError(ValueError):
     """A local source cannot be inspected or used."""
 
 
+class MissingSourceError(MediaError):
+    """The referenced source no longer exists."""
+
+
 def file_identity(path: Path) -> FileIdentity:
     try:
         info = path.stat()
     except FileNotFoundError as exc:
-        raise MediaError(f"Source is missing: {path}") from exc
+        raise MissingSourceError(f"Source is missing: {path}") from exc
     except OSError as exc:
         raise MediaError(f"Cannot access source {path}: {exc}") from exc
     if not stat.S_ISREG(info.st_mode):

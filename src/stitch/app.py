@@ -6,6 +6,7 @@ import logging
 import sys
 from dataclasses import asdict
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from stitch.dependencies import installation_help, probe_tools
 from stitch.paths import AppPaths
@@ -23,10 +24,51 @@ def configure_logging(paths: AppPaths) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Stitch desktop video assembler")
-    parser.add_argument(
+    commands = parser.add_mutually_exclusive_group()
+    commands.add_argument(
         "--check", action="store_true", help="Check storage and media tools, then exit"
     )
+    commands.add_argument("--probe", type=Path, metavar="FILE", help="Print media metadata as JSON")
+    commands.add_argument(
+        "--inspect-project",
+        type=Path,
+        metavar="FILE",
+        help="Validate a project and check its sources",
+    )
+    commands.add_argument(
+        "--project-schema", action="store_true", help="Print the project JSON Schema"
+    )
     args = parser.parse_args(argv)
+    if args.probe or args.inspect_project or args.project_schema:
+        from stitch.media import MediaError, probe_media
+        from stitch.models import Project
+        from stitch.project_io import ProjectError, load_project
+        from stitch.sources import source_status
+
+        try:
+            if args.probe:
+                print(probe_media(args.probe).model_dump_json(indent=2))
+            elif args.project_schema:
+                print(json.dumps(Project.model_json_schema(), indent=2))
+            else:
+                project = load_project(args.inspect_project)
+                statuses = [source_status(source) for source in project.sources]
+                print(
+                    json.dumps(
+                        {
+                            "name": project.name,
+                            "schema_version": project.schema_version,
+                            "clip_count": len(project.clips),
+                            "sources": [asdict(s) for s in statuses],
+                        },
+                        indent=2,
+                    )
+                )
+                return 0 if all(s.state == "ready" for s in statuses) else 1
+        except (MediaError, ProjectError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        return 0
     paths = AppPaths.default()
     try:
         paths.ensure()
