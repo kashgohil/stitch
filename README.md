@@ -42,6 +42,53 @@ uv run stitch --check
 This prints the resolved tools and storage paths. Exit code 0 means setup passed;
 1 means a tool or storage directory needs attention.
 
+## macOS prototype
+
+The package contains Python, Qt, and Stitch. Unzip it and open **Stitch.app** in
+Finder; normal editing does not require a terminal or a Python installation.
+The external **ffmpeg** and **ffprobe** command-line tools must already be
+installed separately, with `libx264`, `libx265`, AAC, and `prores_ks` support.
+The app does not download or install them. Finder launches recognize the standard
+Homebrew folders `/opt/homebrew/bin` and `/usr/local/bin`. For another installation,
+use **Choose FFmpeg folder…** in Media tools; the folder is saved for future launches
+and checked in the background. Folders missing either executable are rejected
+without replacing the saved folder.
+
+The current build is **Apple Silicon (arm64)**, tested on **macOS 26.6.2**. It
+declares macOS 14.4 as the minimum for the locked Qt 6.12 runtime; earlier supported
+versions still require testing. See [Qt's platform requirements](https://doc.qt.io/qt-6/supported-platforms.html).
+Intel macOS, Windows, and Linux packages have not been built or tested.
+
+This is a local prototype with ad-hoc code signing, **not Developer ID signing or
+notarization**. Downloaded copies can be blocked by Gatekeeper. Public distribution
+still needs release signing/notarization and a dependency-license review; collected
+dependency metadata and available license files are included as notices, not as a
+claim that the release compliance work is complete. FFmpeg command-line binaries
+are not bundled; Qt's own playback libraries are part of the Qt runtime.
+
+To build on a Mac with the development dependencies installed:
+
+```sh
+uv sync --locked
+uv run python scripts/package_macos.py
+```
+
+The script creates a new `dist/macos-<architecture>-<unique-id>/` directory for each
+build, containing `Stitch.app`, a ZIP, and `build-info.json`. Previous builds are
+not removed. It verifies the bundle's code signature before creating the ZIP.
+The build uses [PyInstaller's macOS bundle support](https://pyinstaller.org/en/stable/usage.html)
+and does not publish or upload the package.
+
+An explicit GUI-driven package check generates its own short media, edits it,
+tests proxy playback, and exports all three profiles:
+
+```sh
+"/path/to/Stitch.app/Contents/MacOS/Stitch" --smoke-test "/path/to/new-check-directory"
+```
+
+The destination must not exist. The check leaves fixtures, exports, logs, and
+`smoke-report.json` for inspection. It does not use or modify an existing project.
+
 ## Build a sequence
 
 1. Choose **Add videos…** and select your clips. Metadata inspection runs in the
@@ -343,12 +390,39 @@ A macOS spot check using 160×90, 12 fps generated video at 60 versus 600 second
 observed sampled RSS of about 35→41 MiB for Python and 29→35 MiB for FFmpeg.
 This checks duration scaling at low resolution, not peak-memory guarantees or
 multi-hour 4K/8K throughput. Codec buffering still depends on resolution/settings.
+The release matrix additionally checks 1080p at 24/30/60/120 fps, mono and 5.1
+sources at 44.1/96 kHz, quoted/Unicode/backslash paths, and an actual unavailable
+encoder. Full-source duration rounding is tested so ffprobe's microsecond precision
+does not accidentally add a frame; explicit trim ends still round up to a frame.
 They skip when either binary is missing and require FFmpeg 6 or newer for the
 rotation fixture. No existing source footage is needed. To run unit tests only:
 
 ```sh
 uv run pytest -m "not integration"
 ```
+
+### Long-composition check
+
+```sh
+uv run python scripts/endurance.py --seconds 7200
+```
+
+This opt-in check creates a private temporary directory and keeps its artifacts.
+It compares a 60-second export with a two-hour composition of 24 five-minute clips
+at **160×90, 12 fps**, including source audio and a looping overlay. It samples
+Python and child-process RSS every 100 ms, checks final durations, and decodes
+bounded pulse/flash windows near the start, a clip join, midpoint, and end to
+detect drift. It also cancels an active FFmpeg process and checks that an existing
+destination survives. The printed `report.json` records measurements and paths.
+This is not a native 4K/8K performance test, a frame-by-frame two-hour decode, or a
+guarantee of peak memory or cancellation latency on another machine.
+
+On 2026-10-17 (IST), macOS 26.6.2 arm64 with FFmpeg 8.1.1 completed the 60-second
+and 7,200-second cases in 1.11 s and 110.59 s. Sampled Python RSS peaks were
+39.80/75.59 MiB; child-process peaks were 21.17/64.16 MiB. Audio marker error was
+0.042 ms at 5, 300, 3,600, and 7,195 seconds, with video markers on the expected
+frames. Both final stream durations matched 7,200 seconds. Cancelling an observed
+active encoder returned in 0.095 s and preserved the existing destination.
 
 ## Storage
 
@@ -359,6 +433,8 @@ directory; rotating logs use the log directory. On macOS these are under
 `~/Library/Logs/Stitch`. Run `stitch --check` to see exact paths on your system.
 Initialization preserves existing files and each job gets a unique directory.
 FFmpeg is supplied locally, not bundled with this prototype.
+The chosen tool folder is saved as `media-tools.json` beside the projects folder.
+Proxy logs and diagnostic/build artifacts are retained until removed manually.
 
 ## Code layout
 
@@ -370,6 +446,8 @@ FFmpeg is supplied locally, not bundled with this prototype.
 - `src/stitch/preview.py`: Qt proxy playback, source-time inspection, and trim markers.
 - `src/stitch/proxy.py`: identity-keyed preview cache and bounded software transcoding.
 - `src/stitch/dependencies.py`: executable discovery and bounded version probes.
+- `src/stitch/tool_setup.py`: saved external-tool folder and frozen-process environment.
+- `src/stitch/smoke.py`: isolated GUI-driven package validation.
 - `src/stitch/paths.py`: application storage and isolated job directories.
 - `src/stitch/models.py`: validated project and media models; generated JSON Schema.
 - `src/stitch/project_io.py`: versioned reads and atomic writes.
@@ -383,4 +461,7 @@ FFmpeg is supplied locally, not bundled with this prototype.
 - `tests/`: model, storage, source-cache, media integration, CLI, and Qt lifecycle checks.
 
 Plan: [DOC-62 — Stitch weekend plan](https://rezee.app/kash/docs/62).
-Next: [ISSUE-1149 — Validation and packaging](https://rezee.app/kash/plan/1149).
+Release pass: [ISSUE-1149 — Validation and macOS packaging](https://rezee.app/kash/plan/1149).
+Deferred: sustained high-resolution performance validation, HDR/color conversion,
+hardware encoders, full-sequence effects preview, cache management, relinking,
+signed/notarized distribution, and Windows/Linux packaging.

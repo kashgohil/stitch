@@ -13,7 +13,13 @@ dependencies = ["PySide6>=6.8,<7", "platformdirs>=4,<5", "pydantic>=2.10,<3"]
 stitch = "stitch.app:main"
 
 [dependency-groups]
-dev = ["pytest>=8,<10", "pytest-qt>=4.4,<5", "ruff>=0.11,<1"]
+dev = [
+    "psutil>=7,<8",
+    "pyinstaller>=6.20,<7",
+    "pytest>=8,<10",
+    "pytest-qt>=4.4,<5",
+    "ruff>=0.11,<1",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/stitch"]
