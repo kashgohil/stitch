@@ -10,6 +10,8 @@ can populate the queue without selecting every video individually.
 
 ## Setup and launch
 
+For agent onboarding, platform notes, verification, and packaging, see [setup.md](setup.md).
+
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and FFmpeg.
 On macOS with Homebrew:
 
